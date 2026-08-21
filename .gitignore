@@ -1,0 +1,15 @@
+# Training runs: checkpoints, optimizer state and logs. Multi-GB, and reproducible from the
+# commands in the README — keep them out of git and publish weights to the Hub instead.
+outputs/
+wandb/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/

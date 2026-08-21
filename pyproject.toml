@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=71.0.0,<82.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# LeRobot discovers third-party policies by walking installed distributions and importing every 
+# one whose name starts with it (see `lerobot.utils.import_utils.register_third_party_plugins`).
+name = "lerobot_policy_turbovla_so101"
+version = "0.1.0"
+description = "TurboVLA as a drop-in LeRobot policy, validated on a real SO-101 arm: --policy.type=turbovla_so101"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+keywords = ["robotics", "lerobot", "vla", "imitation-learning", "turbovla", "so101"]
+classifiers = [
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# Let pip resolve torch requirements
+dependencies = [
+    "lerobot>=0.6.0",
+    "transformers>=5.4.0,<5.6.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.1.0,<10.0.0"]
+
+[project.urls]
+Homepage = "https://github.com/ravediamond/lerobot-policy-turbovla-so101"
+Repository = "https://github.com/ravediamond/lerobot-policy-turbovla-so101"
+Issues = "https://github.com/ravediamond/lerobot-policy-turbovla-so101/issues"
+"Upstream research code" = "https://github.com/H-EmbodVis/TurboVLA"
+"Prior LeRobot port" = "https://github.com/ez1540/turbovla-lerobot-plugin"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

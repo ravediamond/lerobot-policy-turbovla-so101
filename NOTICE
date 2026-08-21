@@ -1,0 +1,18 @@
+lerobot_policy_turbovla_so101
+Copyright 2026 ravediamond
+
+This product includes software originally developed as part of
+turbovla-lerobot-plugin (https://github.com/ez1540/turbovla-lerobot-plugin),
+Copyright 2026 The TurboVLA-LeRobot contributors, licensed under the
+Apache License, Version 2.0.
+
+The module structure (configuration/modeling/processor split), the
+PreTrainedConfig/PreTrainedPolicy integration, the bidirectional
+vision-language fusion layers, and the ACT-style action decoder are
+adapted from that project. See README.md for the list of changes made
+in this fork.
+
+TurboVLA is itself based on research published as:
+  Xie, H., Yao, C., Wu, X., et al. "TurboVLA: Real-Time Vision-Language-Action
+  Model at 32 Hz on an RTX 4090 with <1 GB VRAM." arXiv:2607.27205 (2026).
+  Upstream research code: https://github.com/H-EmbodVis/TurboVLA

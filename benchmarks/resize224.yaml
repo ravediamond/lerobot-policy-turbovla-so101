@@ -1,0 +1,31 @@
+# Force every frame to 224x224 before it reaches the policy.
+#
+# Use with benchmarks/train_with_yaml.py — draccus builds CLI flags from dataclass *fields*, so the
+# entries of the `dataset.image_transforms.tfs` dict cannot be set on the command line at all. This
+# overlay replaces that dict wholesale, leaving `resize` as the only transform; with
+# `max_num_transforms: 1` and a single entry it is applied to every frame deterministically, which
+# makes it a preprocessing step rather than the augmentation the field is normally used for.
+#
+# Why it matters for a policy comparison: TurboVLA resizes internally to `image_size` because a ViT
+# needs a fixed patch grid, while ACT's ResNet consumes whatever resolution it is handed. On a
+# native 480x640 dataset that hands ACT 4x the pixels, which is both a large compute cost (measured:
+# 3.37 s/step and 24 GB, against 2.35 s/step and 5.4 GB) and a confound — the two policies would
+# differ in visual input as well as in language conditioning. Equalizing here leaves language as the
+# only difference.
+#
+# CAVEAT: LeRobot applies `image_transforms` to the TRAIN dataset only; the eval dataset built by
+# `make_train_eval_datasets` gets `image_transforms=None`. So a run using this overlay must set
+# `--eval_steps=0` and evaluate with benchmarks/eval_per_task.py (which applies `--resize` itself),
+# otherwise the built-in eval scores a 224-trained policy on 480px frames.
+
+dataset:
+  image_transforms:
+    enable: true
+    max_num_transforms: 1
+    random_order: false
+    tfs:
+      resize:
+        weight: 1.0
+        type: Resize
+        kwargs:
+          size: [224, 224]
