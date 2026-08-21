@@ -240,6 +240,12 @@ _Pending: SO-101 training run in progress. This section will report the real-arm
 inference latency on the actual rollout hardware, and a comparison against ACT trained on the same
 dataset — not simulator numbers._
 
+Recording your own SO-101 data first? See
+[`docs/so101_recording_guide.md`](docs/so101_recording_guide.md) — a minimal camera/episode-count
+checklist plus a worked example of diagnosing a dataset that trained badly (hand visible in frame,
+intermittent motion blur, upside-down camera mount) by inspecting the actual footage rather than
+just the training config.
+
 ## Dataset requirements
 
 - At least one `observation.images.*` key. Several are treated as multiple camera views, each
