@@ -55,9 +55,7 @@ class TurboVLADecoderLayer(nn.Module):
         queries = queries + self.dropout(self.self_attn(normed, normed))
 
         queries = queries + self.dropout(
-            self.cross_attn(
-                self.norm_cross_attn(queries), memory, key_padding_mask=memory_padding_mask
-            )
+            self.cross_attn(self.norm_cross_attn(queries), memory, key_padding_mask=memory_padding_mask)
         )
 
         queries = queries + self.dropout(self.ffn(self.norm_ffn(queries)))
@@ -71,9 +69,7 @@ class TurboVLAActionDecoder(nn.Module):
         super().__init__()
         self.config = config
         self.query_embed = nn.Embedding(config.chunk_size, config.dim_model)
-        self.layers = nn.ModuleList(
-            [TurboVLADecoderLayer(config) for _ in range(config.n_decoder_layers)]
-        )
+        self.layers = nn.ModuleList([TurboVLADecoderLayer(config) for _ in range(config.n_decoder_layers)])
         self.norm = nn.LayerNorm(config.dim_model)
         self.action_head = nn.Linear(config.dim_model, action_dim)
 

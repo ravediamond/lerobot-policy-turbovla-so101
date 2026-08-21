@@ -56,14 +56,12 @@ import collections
 
 import torch
 import torch.nn.functional as F  # noqa: N812
+from eval_per_task import group_frames_by_task, load_checkpoint, split_episodes
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.datasets.factory import resolve_delta_timestamps
 from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
-from lerobot.policies.factory import get_policy_class, make_pre_post_processors
 
 import lerobot_policy_turbovla_so101  # noqa: F401  (registers `turbovla_so101`)
-
-from eval_per_task import group_frames_by_task, load_checkpoint, split_episodes
 
 
 def subsample(indices: list[int], limit: int) -> list[int]:
@@ -84,9 +82,7 @@ def build_observation(samples, resize: int) -> dict:
             stacked = stacked.float()
             if stacked.max() > 1.5:
                 stacked = stacked / 255.0
-            stacked = F.interpolate(
-                stacked, size=(resize, resize), mode="bilinear", align_corners=False
-            )
+            stacked = F.interpolate(stacked, size=(resize, resize), mode="bilinear", align_corners=False)
         obs[key] = stacked
     return obs
 
@@ -127,8 +123,8 @@ def run_pair(policy, pre, post, dataset, frames_by_task, task_a, task_b, args):
             err = ((preds[label][:, :horizon] - target).abs() * mask).sum().item()
             sums[label] += err
         sums["divergence"] += (
-            (preds["factual"][:, :horizon] - preds["counterfactual"][:, :horizon]).abs() * mask
-        ).sum().item()
+            ((preds["factual"][:, :horizon] - preds["counterfactual"][:, :horizon]).abs() * mask).sum().item()
+        )
         count += n
 
     return {k: v / max(count, 1) for k, v in sums.items()} | {"frames": len(indices)}
@@ -139,7 +135,11 @@ def main():
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--checkpoint", action="append", required=True, metavar="NAME=PATH")
     parser.add_argument(
-        "--pair", action="append", nargs=2, required=True, metavar=("TASK_A", "TASK_B"),
+        "--pair",
+        action="append",
+        nargs=2,
+        required=True,
+        metavar=("TASK_A", "TASK_B"),
         help="repeatable; two task strings that share a scene and differ only in the instruction",
     )
     parser.add_argument("--eval-split", type=float, default=0.2)

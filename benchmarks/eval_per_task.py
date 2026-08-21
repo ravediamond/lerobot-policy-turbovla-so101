@@ -145,7 +145,6 @@ def select_frames(dataset: LeRobotDataset, max_per_task: int) -> dict[str, list[
 @torch.no_grad()
 def evaluate(policy, preprocessor, postprocessor, dataset, frames_by_task, args):
     """Mean absolute action-chunk error per task, in the dataset's action units."""
-    device = args.device
     results = {}
 
     for task, indices in sorted(frames_by_task.items()):

@@ -144,9 +144,7 @@ def build_policy(config):
 
 def build_observation(args, device):
     obs = {
-        f"observation.images.cam{i}": torch.rand(
-            1, 3, args.resolution, args.resolution, device=device
-        )
+        f"observation.images.cam{i}": torch.rand(1, 3, args.resolution, args.resolution, device=device)
         for i in range(args.cameras)
     }
     obs["observation.state"] = torch.randn(1, args.state_dim, device=device)
@@ -194,11 +192,14 @@ def benchmark(name: str, args) -> dict:
         torch.cuda.reset_peak_memory_stats()
 
     with torch.inference_mode():
-        samples = time_calls(lambda: policy.predict_action_chunk(batch), args.iters, args.warmup, device)
+        samples = time_calls(
+            lambda policy=policy, batch=batch: policy.predict_action_chunk(batch),
+            args.iters,
+            args.warmup,
+            device,
+        )
 
-    peak_mb = (
-        torch.cuda.max_memory_allocated() / 1024**2 if device.startswith("cuda") else float("nan")
-    )
+    peak_mb = torch.cuda.max_memory_allocated() / 1024**2 if device.startswith("cuda") else float("nan")
 
     samples.sort()
     median = statistics.median(samples)

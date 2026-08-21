@@ -171,9 +171,7 @@ class TurboVLAVLInteraction(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.layers = nn.ModuleList(
-            [TurboVLAFusionLayer(config) for _ in range(config.n_fusion_layers)]
-        )
+        self.layers = nn.ModuleList([TurboVLAFusionLayer(config) for _ in range(config.n_fusion_layers)])
         self.norm_vision = nn.LayerNorm(config.dim_model)
         self.norm_text = nn.LayerNorm(config.dim_model)
 

@@ -40,10 +40,9 @@ from typing import Unpack
 
 import torch
 import torch.nn.functional as F  # noqa: N812
-from torch import Tensor, nn
-
 from lerobot.policies.pretrained import ActionSelectKwargs, PreTrainedPolicy
 from lerobot.utils.constants import ACTION, OBS_STATE
+from torch import Tensor, nn
 
 from .action_decoder import TurboVLAActionDecoder
 from .configuration_turbovla_so101 import TurboVLAConfig
@@ -138,7 +137,7 @@ class TurboVLAPolicy(PreTrainedPolicy):
         jitter at chunk boundaries from a single-shot decoder. Otherwise it works by managing the
         actions in a queue and only calling `predict_action_chunk` when the queue is empty.
         """
-        self.eval()  # keeping the policy in eval mode as it could be set to train mode while queue is consumed
+        self.eval()  # keep eval mode even if train() was called while the queue is being consumed
 
         if self.config.temporal_ensemble_coeff is not None:
             actions = self.predict_action_chunk(batch)
@@ -303,8 +302,7 @@ class TurboVLA(nn.Module):
             tasks = list(tasks)
         if len(tasks) != batch_size:
             raise ValueError(
-                f"Got {len(tasks)} task strings for a batch of {batch_size}. They must correspond "
-                "one-to-one."
+                f"Got {len(tasks)} task strings for a batch of {batch_size}. They must correspond one-to-one."
             )
 
         encoded = self.tokenizer(
@@ -343,9 +341,7 @@ class TurboVLA(nn.Module):
 
         tasks = batch.get("task")
         if tasks is None:
-            raise ValueError(
-                "TurboVLA requires a task description, but the batch has no `task` key."
-            )
+            raise ValueError("TurboVLA requires a task description, but the batch has no `task` key.")
         text_tokens, text_mask = self._encode_language(tasks, batch_size, device)
 
         vision_tokens, text_tokens = self.vl_interaction(
@@ -357,9 +353,7 @@ class TurboVLA(nn.Module):
         memory = torch.cat([vision_tokens, text_tokens], dim=1)
         memory_mask = torch.cat(
             [
-                torch.ones(
-                    vision_tokens.shape[:2], dtype=torch.bool, device=device
-                ),
+                torch.ones(vision_tokens.shape[:2], dtype=torch.bool, device=device),
                 text_mask,
             ],
             dim=1,
@@ -390,7 +384,9 @@ def _load_vision_backbone(config: TurboVLAConfig) -> tuple[nn.Module, int, int]:
         else:
             model = AutoModel.from_config(backbone_config)
     except OSError as e:
-        raise OSError(f"Could not load vision backbone '{config.vision_backbone}'. {_GATED_BACKBONE_HINT}") from e
+        raise OSError(
+            f"Could not load vision backbone '{config.vision_backbone}'. {_GATED_BACKBONE_HINT}"
+        ) from e
 
     patch_size = getattr(backbone_config, "patch_size", None)
     if patch_size is None:

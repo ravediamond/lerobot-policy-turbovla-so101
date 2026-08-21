@@ -27,9 +27,7 @@ the backbones cannot be downloaded.
 try:
     import lerobot  # noqa: F401
 except ImportError as e:
-    raise ImportError(
-        "lerobot is not installed. Please install lerobot to use this policy package."
-    ) from e
+    raise ImportError("lerobot is not installed. Please install lerobot to use this policy package.") from e
 
 from .configuration_turbovla_so101 import TurboVLAConfig
 from .modeling_turbovla_so101 import TurboVLA, TurboVLAPolicy

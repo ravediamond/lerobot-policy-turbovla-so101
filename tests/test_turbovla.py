@@ -86,8 +86,9 @@ def tiny_backbones(monkeypatch):
 
 
 def make_config(n_cameras: int = 2, **overrides) -> TurboVLAConfig:
+    image_shape = (3, IMAGE_SIZE, IMAGE_SIZE)
     input_features = {
-        f"observation.images.cam{i}": PolicyFeature(type=FeatureType.VISUAL, shape=(3, IMAGE_SIZE, IMAGE_SIZE))
+        f"observation.images.cam{i}": PolicyFeature(type=FeatureType.VISUAL, shape=image_shape)
         for i in range(n_cameras)
     }
     input_features["observation.state"] = PolicyFeature(type=FeatureType.STATE, shape=(STATE_DIM,))

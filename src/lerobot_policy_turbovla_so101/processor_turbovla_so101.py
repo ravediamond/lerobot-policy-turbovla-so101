@@ -16,7 +16,6 @@
 from typing import Any
 
 import torch
-
 from lerobot.processor import (
     PolicyAction,
     PolicyProcessorPipeline,
@@ -53,7 +52,7 @@ def make_turbovla_so101_pre_post_processors(
             statistics (e.g., mean and std) used for normalization. Defaults to None.
 
     Returns:
-        tuple[PolicyProcessorPipeline[dict[str, Any], dict[str, Any]], PolicyProcessorPipeline[PolicyAction, PolicyAction]]: A tuple containing the
-        pre-processor pipeline and the post-processor pipeline.
+        A `(preprocessor, postprocessor)` tuple: the pre-processor pipeline and the post-processor
+        pipeline.
     """
     return make_default_pre_post_processors(config, dataset_stats, normalizer_device=config.device)
