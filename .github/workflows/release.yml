@@ -1,0 +1,57 @@
+name: Release
+
+# Triggered by publishing a GitHub Release (tag vX.Y.Z). Builds sdist + wheel and pushes them to
+# PyPI via Trusted Publishing (OIDC) -- no PyPI API token is stored in this repo's secrets.
+#
+# One-time setup required on pypi.org before the first release can succeed: on the project's
+# "Publishing" settings (or, for a project that doesn't exist yet, pypi.org/manage/account/publishing/),
+# add a pending trusted publisher with:
+#   Owner:        ravediamond
+#   Repository:   lerobot-policy-turbovla-so101
+#   Workflow:     release.yml
+#   Environment:  pypi
+# See https://docs.pypi.org/trusted-publishers/adding-a-publisher/
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Verify tag matches package version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG_VERSION="$(uvx --from tomli python -c "import tomli,sys; print(tomli.load(open('pyproject.toml','rb'))['project']['version'])")"
+          if [ "$TAG" != "$PKG_VERSION" ]; then
+            echo "::error::Tag v$TAG does not match pyproject.toml version $PKG_VERSION"
+            exit 1
+          fi
+        if: github.event_name == 'release'
+
+      - run: uv build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # required for PyPI Trusted Publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - uses: pypa/gh-action-pypi-publish@release/v1

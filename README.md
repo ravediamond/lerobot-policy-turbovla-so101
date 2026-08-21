@@ -1,27 +1,51 @@
 # lerobot_policy_turbovla_so101
 
-TurboVLA as a standalone [LeRobot](https://github.com/huggingface/lerobot) policy plugin, trained
-and validated end-to-end on a real SO-101 arm.
+<p align="left">
+  <a href="https://pypi.org/project/lerobot-policy-turbovla-so101/"><img src="https://img.shields.io/pypi/v/lerobot-policy-turbovla-so101.svg" alt="PyPI"></a>
+  <a href="https://pypi.org/project/lerobot-policy-turbovla-so101/"><img src="https://img.shields.io/pypi/pyversions/lerobot-policy-turbovla-so101.svg" alt="Python versions"></a>
+  <a href="https://github.com/ravediamond/lerobot-policy-turbovla-so101/actions/workflows/ci.yml"><img src="https://github.com/ravediamond/lerobot-policy-turbovla-so101/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/ravediamond/lerobot-policy-turbovla-so101/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License"></a>
+  <a href="https://arxiv.org/abs/2607.27205"><img src="https://img.shields.io/badge/Paper-arXiv-b31b1b.svg" alt="Paper"></a>
+</p>
+
+TurboVLA as a standalone [LeRobot](https://github.com/huggingface/lerobot) policy plugin — trained
+and validated end-to-end on a real [SO-101](https://github.com/TheRobotStudio/SO-ARM100) arm, not
+just simulation.
 
 ```bash
-lerobot-train --policy.type=act               ...   # before
-lerobot-train --policy.type=turbovla_so101     ...   # after
+lerobot-train --policy.type=act              ...   # before
+lerobot-train --policy.type=turbovla_so101   ...   # after
 ```
 
-Everything else in the workflow record, train, rollout stays identical. This registers a policy and lets `lerobot-train`
-drive it.
+Everything else in the workflow — record, train, rollout — stays identical. This registers a
+policy and lets `lerobot-train` drive it; no fork of LeRobot itself, no custom harness.
+
+## Contents
+
+- [Why TurboVLA instead of ACT](#why-turbovla-instead-of-act)
+- [Architecture](#architecture)
+- [Install](#install)
+- [Train](#train)
+- [Configuration](#configuration)
+- [Results](#results)
+- [Dataset requirements](#dataset-requirements)
+- [Benchmarks and evaluation](#benchmarks-and-evaluation)
+- [Tests](#tests)
+- [Citation](#citation)
+- [Attribution](#attribution)
+- [License](#license)
 
 ## Why TurboVLA instead of ACT
 
 Same ergonomics as ACT (chunked continuous actions, parallel decode, L1 loss), but language
 conditioned:
 
-|                    | ACT                   | TurboVLA                            |
-| ------------------ | --------------------- | ----------------------------------- |
-| Language           | none                  | BERT token-level, fused into vision |
-| Visual backbone    | ResNet18              | DINOv3 ViT-B                        |
-| Action decode      | parallel chunk queries| parallel chunk queries (same idea)  |
-| Params             | ~80M                  | ~0.2B                               |
+|                 | ACT                    | TurboVLA                            |
+| --------------- | ---------------------- | ------------------------------------ |
+| Language        | none                   | BERT token-level, fused into vision  |
+| Visual backbone | ResNet18                | DINOv3 ViT-B                        |
+| Action decode   | parallel chunk queries  | parallel chunk queries (same idea)  |
+| Params          | ~80M                    | ~0.2B                                |
 
 The practical win on a multi-task arm dataset: ACT ignores the task string, so you need one
 checkpoint per task. TurboVLA conditions on it, so one checkpoint can cover many tasks in the same
@@ -31,25 +55,6 @@ Upstream research code: <https://github.com/H-EmbodVis/TurboVLA>; paper
 [arXiv:2607.27205](https://arxiv.org/abs/2607.27205). Only the modules were ported here, not the
 harness. The upstream is built around its own trainer, TFDS/RLDS for LIBERO, and a `flash-attn`
 dependency this package avoids.
-
-## Attribution
-
-The LeRobot-native module split (`configuration_*` / `modeling_*` / `processor_*`, the
-`PreTrainedConfig`/`PreTrainedPolicy` wiring, the bidirectional fusion and ACT-style decoder
-reimplementation) is adapted from [`ez1540/turbovla-lerobot-plugin`](https://github.com/ez1540/turbovla-lerobot-plugin),
-the first working LeRobot port of TurboVLA, licensed Apache-2.0. Credit to its author for that initial
-port. This repository is an independent continuation, not a GitHub fork, and adds:
-
-- End-to-end training and rollout validation on a real SO-101 arm (see [Results](#results)),
-  the one thing neither this port nor the upstream research repo had before.
-- Real-time chunking (RTC) support for smoother rollout at chunk boundaries.
-- `torch.compile` hook on the fusion/decoder stack, since inference speed is TurboVLA's whole
-  pitch.
-- Backbone-loading guarded via LeRobot's own `require_package`, matching the convention used by
-  in-tree policies (SmolVLA, etc.) rather than a private equivalent.
-
-No PEFT/LoRA support — out of scope for this fork, matching the model's small (~0.2B) parameter
-count where full fine-tuning is already cheap.
 
 ## Architecture
 
@@ -107,18 +112,21 @@ pip install -r /tmp/deps.txt "transformers>=5.4.0,<5.6.0"
 
 # 3. confirm your torch survived
 python -c "import torch; print(torch.__version__)"
+```
 
-pip then prints a dependency-conflict warning about torch<2.12.0. It is advisory; the policy runs
-fine on newer torch.
+pip then prints a dependency-conflict warning about `torch<2.12.0`. It is advisory; the policy
+runs fine on newer torch.
 
 To make this durable, pin torch in a constraints file so any future pip command in the
 environment fails loudly instead of replacing it:
 
+```bash
 python -c "import torch, torchvision; print(f'torch=={torch.__version__}\ntorchvision=={torchvision.__version__}')" \
   > ~/.config/pip/torch-constraints.txt
 export PIP_CONSTRAINT=~/.config/pip/torch-constraints.txt
+```
 
-To work on the package itself, `pip install -e .` from a clone.
+To work on the package itself, `pip install -e ".[test]"` from a clone.
 
 Verify discovery:
 
@@ -142,7 +150,7 @@ model page, then authenticate:
 hf auth login          # or: export HF_TOKEN=...
 ```
 
-Without that you get a 401 at model construction. Three ways around it:
+Without that you get a 401 at model construction. Two ways around it:
 
 ```bash
 # 1. Use an ungated backbone instead (any patch-based ViT that AutoModel can load).
@@ -169,7 +177,7 @@ lerobot-train \
 ```
 
 Point `--dataset.repo_id` at any community LeRobot dataset to smoke-test the policy before a robot
-is involved. 
+is involved.
 
 ### Multi-GPU
 
@@ -206,23 +214,23 @@ lerobot-train --config_path=${HF_USER}/turbovla-so101 --resume=true
 Defaults follow the paper's LIBERO recipe, which is also a sane starting point for SO-101 real-arm
 data: 6-DoF + gripper is close to the 7-D case, and `chunk_size=12` at 30 fps is a reasonable chunk.
 
-| Flag                                   | Default                                    | Notes                                        |
-| -------------------------------------- | ------------------------------------------ | -------------------------------------------- |
-| `--policy.chunk_size`                  | `12`                                       | `H`, the number of action queries             |
-| `--policy.n_action_steps`              | `12`                                       | steps executed per model call; ≤ `chunk_size` |
-| `--policy.dim_model`                   | `256`                                      | shared width `d`                              |
-| `--policy.n_fusion_layers`             | `6`                                        | `N` bidirectional layers                      |
-| `--policy.n_decoder_layers`            | `4`                                        | action decoder depth                          |
-| `--policy.vision_backbone`             | `facebook/dinov3-vitb16-pretrain-lvd1689m` | gated; see above                              |
-| `--policy.language_backbone`           | `google-bert/bert-base-uncased`            | swappable (paper: T5-small 97.1%)             |
-| `--policy.freeze_vision_backbone`      | `true`                                     | dominates VRAM and final quality              |
-| `--policy.freeze_language_backbone`    | `true`                                     | as above                                      |
-| `--policy.load_pretrained_backbones`   | `true`                                     | `false` = random init, smoke tests only       |
-| `--policy.image_size`                  | `224`                                      | must divide by the backbone's patch size      |
-| `--policy.optimizer_lr`                | `5e-5`                                     | peak LR for the trunk                         |
-| `--policy.optimizer_lr_backbone`       | `5e-6`                                     | ignored while backbones are frozen            |
-| `--policy.use_rtc`                     | `false`                                    | real-time chunking for smoother action handoff at rollout |
-| `--policy.compile_model`               | `false`                                    | `torch.compile` the fusion + action-decoder stack |
+| Flag                                | Default                                    | Notes                                                      |
+| ------------------------------------ | ------------------------------------------- | ------------------------------------------------------------ |
+| `--policy.chunk_size`                | `12`                                        | `H`, the number of action queries                           |
+| `--policy.n_action_steps`            | `12`                                        | steps executed per model call; ≤ `chunk_size`               |
+| `--policy.dim_model`                 | `256`                                       | shared width `d`                                            |
+| `--policy.n_fusion_layers`           | `6`                                         | `N` bidirectional layers                                    |
+| `--policy.n_decoder_layers`          | `4`                                         | action decoder depth                                        |
+| `--policy.vision_backbone`           | `facebook/dinov3-vitb16-pretrain-lvd1689m`  | gated; see above                                             |
+| `--policy.language_backbone`         | `google-bert/bert-base-uncased`             | swappable (paper: T5-small 97.1%)                            |
+| `--policy.freeze_vision_backbone`    | `true`                                      | dominates VRAM and final quality                             |
+| `--policy.freeze_language_backbone`  | `true`                                      | as above                                                     |
+| `--policy.load_pretrained_backbones` | `true`                                      | `false` = random init, smoke tests only                      |
+| `--policy.image_size`                | `224`                                       | must divide by the backbone's patch size                     |
+| `--policy.optimizer_lr`              | `5e-5`                                      | peak LR for the trunk                                        |
+| `--policy.optimizer_lr_backbone`     | `5e-6`                                      | ignored while backbones are frozen                           |
+| `--policy.temporal_ensemble_coeff`   | `null`                                      | exponential chunk-blend smoothing; requires `n_action_steps=1` when set |
+| `--policy.compile_model`             | `false`                                     | `torch.compile` the fusion + action-decoder stack             |
 
 For the paper's RoboTwin recipe, raise `--policy.chunk_size=50` and switch to a ViT-L backbone.
 
@@ -305,11 +313,52 @@ instead.
 ## Tests
 
 ```bash
+pip install -e ".[test]"
 pytest -q
 ```
 
 The tests build a tiny randomly initialized model, so they need no Hub access and no GPU.
 
+## Citation
+
+This package is an independent LeRobot integration, not affiliated with the paper's authors. If
+TurboVLA itself is useful in your research, cite the paper:
+
+```bibtex
+@article{xie2026turbovla,
+  title  = {TurboVLA: Real-Time Vision-Language-Action Model at
+            32 Hz on an RTX 4090 with <1 GB VRAM},
+  author = {Xie, Hengyi and Yao, Chenfei and Wu, Xianjin and
+            Xi, Xuanyang and Tang, Yiping and Xu, Di and
+            Zhu, Yingying and Liang, Dingkang and Bai, Xiang and
+            Ding, Han},
+  journal = {arXiv preprint arXiv:2607.27205},
+  year   = {2026}
+}
+```
+
+## Attribution
+
+The LeRobot-native module split (`configuration_*` / `modeling_*` / `processor_*`, the
+`PreTrainedConfig`/`PreTrainedPolicy` wiring, the bidirectional fusion and ACT-style decoder
+reimplementation) is adapted from [`ez1540/turbovla-lerobot-plugin`](https://github.com/ez1540/turbovla-lerobot-plugin),
+the first working LeRobot port of TurboVLA, licensed Apache-2.0. Credit to its author for that
+initial port; see `NOTICE` for the full statement. This repository is an independent continuation,
+not a GitHub fork, and adds:
+
+- End-to-end training and rollout validation on a real SO-101 arm (see [Results](#results)) —
+  the one thing neither this port nor the upstream research repo had before.
+- Temporal ensembling (exponential blending of overlapping action chunks across timesteps,
+  as in ACT's Algorithm 2) for smoother rollout at chunk boundaries. Real-time chunking (RTC)
+  does not apply here — RTC corrects an iterative flow-matching denoising trajectory, and this
+  decoder, like ACT's, predicts the whole chunk in one parallel forward pass with nothing to
+  correct mid-trajectory.
+- `torch.compile` hook on the fusion/decoder stack, since inference speed is TurboVLA's whole
+  pitch.
+
+No PEFT/LoRA support — out of scope for this fork, matching the model's small (~0.2B) parameter
+count where full fine-tuning is already cheap.
+
 ## License
 
-Apache-2.0.
+Apache-2.0. See `LICENSE` and `NOTICE`.
