@@ -33,7 +33,6 @@ Homepage = "https://github.com/ravediamond/lerobot-policy-turbovla-so101"
 Repository = "https://github.com/ravediamond/lerobot-policy-turbovla-so101"
 Issues = "https://github.com/ravediamond/lerobot-policy-turbovla-so101/issues"
 "Upstream research code" = "https://github.com/H-EmbodVis/TurboVLA"
-"Prior LeRobot port" = "https://github.com/ez1540/turbovla-lerobot-plugin"
 
 [tool.setuptools.packages.find]
 where = ["src"]

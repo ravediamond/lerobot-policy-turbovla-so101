@@ -361,12 +361,9 @@ TurboVLA itself is useful in your research, cite the paper:
 
 ## Attribution
 
-The LeRobot-native module split (`configuration_*` / `modeling_*` / `processor_*`, the
-`PreTrainedConfig`/`PreTrainedPolicy` wiring, the bidirectional fusion and ACT-style decoder
-reimplementation) is adapted from [`ez1540/turbovla-lerobot-plugin`](https://github.com/ez1540/turbovla-lerobot-plugin),
-the first working LeRobot port of TurboVLA, licensed Apache-2.0. Credit to its author for that
-initial port; see `NOTICE` for the full statement. This repository is an independent continuation,
-not a GitHub fork, and adds:
+Portions of this package are adapted from an earlier Apache-2.0-licensed LeRobot port of TurboVLA;
+see `NOTICE` for the required statement. This repository is an independent continuation, not a
+GitHub fork, and adds:
 
 - End-to-end training and rollout validation on a real SO-101 arm (see [Results](#results)) —
   the one thing neither this port nor the upstream research repo had before.
