@@ -78,7 +78,9 @@ def build_observation(samples, resize: int) -> dict:
         if not key.startswith("observation."):
             continue
         stacked = torch.stack([s[key] for s in samples])
-        if key.startswith("observation.images.") and resize:
+        # `_is_pad` companions share the image prefix but are 1-D boolean masks, not frames. They
+        # appear whenever a policy sets `observation_delta_indices` (SmolVLA does, ACT does not).
+        if key.startswith("observation.images.") and not key.endswith("_is_pad") and resize:
             stacked = stacked.float()
             if stacked.max() > 1.5:
                 stacked = stacked / 255.0

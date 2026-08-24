@@ -101,6 +101,57 @@ def find_minimal_pairs(tasks: list[str]) -> list[tuple[str, str]]:
     return pairs
 
 
+def recorded_signatures(dataset, frames_by_task) -> dict:
+    """Mean recorded action chunk per task, used as a behavioural fingerprint.
+
+    `find_minimal_pairs` works on strings, so it cannot tell the two kinds of one-word difference
+    apart, and they carry opposite expectations:
+
+    * **paraphrase** -- "collect the alphabet soup" vs "grab the alphabet soup". Same underlying
+      manipulation, so a good policy should predict nearly the *same* actions. Divergence here is a
+      fault (the policy is keying on surface wording).
+    * **target swap** -- "put the bbq sauce in the basket" vs "put the tomato sauce in the basket".
+      Different object, so a good policy must predict *different* actions. Divergence here is the
+      whole point.
+
+    Averaging the two together cancels the signal against its own opposite. The demonstrations
+    already record which kind a pair is: two instructions that were carried out with the same
+    motion are paraphrases, and two that were not are target swaps. This returns that fingerprint
+    so pairs can be split on the data rather than on a hand-written word list.
+    """
+    sigs = {}
+    for task, indices in frames_by_task.items():
+        chunks = []
+        for i in indices:
+            a = dataset[i]["action"].float()
+            chunks.append(a if a.ndim == 2 else a.unsqueeze(0))
+        if chunks:
+            sigs[task] = torch.stack(chunks).mean(0).flatten()
+    return sigs
+
+
+def rank_pairs_by_behaviour(pairs, sigs):
+    """Minimal pairs sorted by how differently their demonstrations were actually performed.
+
+    This deliberately does NOT return a paraphrase/target-swap classification. Distances measured
+    this way tend to be smooth and unimodal rather than bimodal, so there is no natural boundary to
+    cut on, and inventing one would launder a guess as a measurement.
+
+    What the ranking is good for is choosing which pairs to spend evaluation on. Pairs at the top
+    were carried out most differently, so they are the best candidates for testing whether the
+    policy follows the instruction; pairs at the bottom were carried out most similarly, so they are
+    the best candidates for testing that it is not merely reacting to surface wording. Confirm a
+    candidate by reading it before trusting it either way.
+    """
+    scored = []
+    for a, b in pairs:
+        if a in sigs and b in sigs:
+            n = min(sigs[a].numel(), sigs[b].numel())
+            scored.append(((sigs[a][:n] - sigs[b][:n]).abs().mean().item(), a, b))
+    scored.sort()
+    return scored
+
+
 def load_checkpoint(path: str, device: str):
     config = PreTrainedConfig.from_pretrained(path)
     config.device = device
@@ -143,8 +194,15 @@ def select_frames(dataset: LeRobotDataset, max_per_task: int) -> dict[str, list[
 
 
 @torch.no_grad()
-def evaluate(policy, preprocessor, postprocessor, dataset, frames_by_task, args):
-    """Mean absolute action-chunk error per task, in the dataset's action units."""
+def evaluate(policy, preprocessor, postprocessor, dataset, frames_by_task, args, horizon=None):
+    """Mean absolute action-chunk error per task, in the dataset's action units.
+
+    `horizon` caps how many steps of the chunk are scored. Left as None, each batch is scored over
+    as much of the chunk as both the prediction and the target provide, which is what a single
+    policy wants. Comparing policies needs it pinned instead: mean absolute error grows with
+    prediction horizon, so a policy scored over 12 steps and one scored over 50 are not on the same
+    scale no matter which is actually better.
+    """
     results = {}
 
     for task, indices in sorted(frames_by_task.items()):
@@ -159,7 +217,11 @@ def evaluate(policy, preprocessor, postprocessor, dataset, frames_by_task, args)
                 if not key.startswith("observation."):
                     continue
                 stacked = torch.stack([s[key] for s in samples])
-                if key.startswith("observation.images.") and args.resize:
+                # `_is_pad` companions are boolean masks, not frames. They only appear for policies
+                # whose `observation_delta_indices` is set (SmolVLA's is `[0]`, ACT's is None), and
+                # they share the `observation.images.` prefix, so a prefix test alone routes a
+                # 1-D mask into the image resize and fails there.
+                if key.startswith("observation.images.") and not key.endswith("_is_pad") and args.resize:
                     stacked = stacked.float()
                     if stacked.max() > 1.5:  # uint8 frames arrive in [0, 255]
                         stacked = stacked / 255.0
@@ -175,12 +237,14 @@ def evaluate(policy, preprocessor, postprocessor, dataset, frames_by_task, args)
             target = torch.stack([s["action"] for s in samples]).cpu().float()
             if target.ndim == 2:  # no chunking configured on the dataset
                 target = target.unsqueeze(1)
-            horizon = min(predicted.shape[1], target.shape[1])
-            predicted, target = predicted[:, :horizon], target[:, :horizon]
+            h = min(predicted.shape[1], target.shape[1])
+            if horizon:
+                h = min(h, horizon)
+            predicted, target = predicted[:, :h], target[:, :h]
 
             mask = torch.ones_like(target, dtype=torch.bool)
             if "action_is_pad" in samples[0]:
-                pad = torch.stack([s["action_is_pad"] for s in samples]).cpu()[:, :horizon]
+                pad = torch.stack([s["action_is_pad"] for s in samples]).cpu()[:, :h]
                 mask = ~pad.unsqueeze(-1).expand_as(target)
 
             total_err += ((predicted - target).abs() * mask).sum().item()
@@ -280,14 +344,38 @@ def main():
     print()
     print("Units are the dataset's action units (degrees for SO-101). Lower is better.")
     if pairs:
-        print(f"\nDetected {len(pairs)} one-word-different task pairs (marked * above):")
-        for a, b in pairs:
-            print(f"  - {a!r}\n    {b!r}")
-        print(
-            "\nCheck these by hand: a pair differing by a VISIBLE attribute (object colour) is still\n"
-            "solvable from pixels alone, so only pairs differing by something absent from the image\n"
-            "(a destination chosen by the instruction) actually test language conditioning."
-        )
+        sigs = recorded_signatures(dataset, frames_by_task)
+        scored = rank_pairs_by_behaviour(pairs, sigs)
+        dists = [d for d, _, _ in scored]
+
+        print(f"\nDetected {len(pairs)} one-word-different task pairs (marked * above).")
+        if dists:
+            srt = sorted(dists)
+            deciles = " ".join(f"{srt[int(q * (len(srt) - 1) / 10)]:.3f}" for q in range(11))
+            print(f"Recorded-action distance across those pairs, deciles: {deciles}")
+            print(
+                "A one-word difference means two things that grade in OPPOSITE directions, and the\n"
+                "sentence alone does not say which:\n"
+                "  paraphrase  -- 'collect the soup' vs 'grab the soup'. Same intent, so predictions\n"
+                "                 SHOULD match; divergence means the policy keys on surface wording.\n"
+                "  target swap -- 'the bbq sauce' vs 'the tomato sauce'. Different object, so\n"
+                "                 predictions SHOULD differ; divergence is language being used, and a\n"
+                "                 policy with no language input scores zero here by construction.\n"
+                "Averaging the two together cancels the signal against its own opposite, so they have\n"
+                "to be evaluated separately.\n"
+                "\nThe distances above rank the pairs by how differently the demonstrations were\n"
+                "actually performed, which is the best automatic guide available -- but they are\n"
+                "NOT a classification. If they turn out smooth and unimodal, with no boundary to cut\n"
+                "on, the two ends are candidates to confirm by reading, not labels.\n"
+                "Feed the confirmed pairs to eval_instruction_sensitivity.py, which measures the\n"
+                "divergence itself; this script only finds candidates."
+            )
+            print("\n  most differently performed -- candidate TARGET SWAPS (expect divergence):")
+            for d, a, b in scored[:-9:-1]:
+                print(f"    {d:.3f}  {a!r}\n           {b!r}")
+            print("\n  most similarly performed -- candidate PARAPHRASES (expect agreement):")
+            for d, a, b in scored[:8]:
+                print(f"    {d:.3f}  {a!r}\n           {b!r}")
 
 
 if __name__ == "__main__":

@@ -279,6 +279,28 @@ Results are broken out per task rather than reduced to one number, because a mul
 mixes tasks a language-blind policy can solve from pixels with tasks it cannot, and averaging lets
 the first kind hide the second.
 
+**Held-out MAE across a training run** (`eval_curve.py` + `plot_curves.py`) — scores every numbered
+checkpoint of a run instead of just the last one, so the `Results` section above can report a real
+learning curve rather than a single end-of-training number that might be an overfit peak or a run
+cut short mid-descent.
+
+```bash
+python benchmarks/eval_curve.py \
+    --dataset <hub-id> --eval-split 0.2 --resize 224 \
+    --run turbovla_so101=outputs/cmp_turbovla_so101 --json benchmarks/results/curves.json
+
+pip install -e ".[plots]"
+python benchmarks/plot_curves.py \
+    --loss-log outputs/cmp_turbovla_so101.log \
+    --mae-json benchmarks/results/curves.json \
+    --out benchmarks/results/curves.png
+```
+
+Training loss (parsed from the `lerobot-train` log) and held-out MAE are plotted side by side: loss
+shows whether the run actually converged, MAE shows whether it converged to something that predicts
+well on data it never trained on. `--run` also accepts several `NAME=DIR` entries to compare against
+baseline runs (e.g. ACT) trained under the same protocol, at a shared horizon.
+
 **Counterfactual instruction test** (`eval_instruction_sensitivity.py`) — the direct test of whether
 a policy uses the instruction at all. It runs the policy twice on identical pixels, once with the
 recorded instruction and once with a paired one, and reports whether swapping the sentence actually
