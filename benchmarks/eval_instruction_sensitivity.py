@@ -15,31 +15,15 @@
 # limitations under the License.
 """Counterfactual instruction test: does the policy actually *use* the sentence?
 
-Aggregate held-out error is a blunt instrument for this question. Two tasks that share a scene and
-differ only in the instruction also share their approach and grasp phases, so most frames carry no
-information about which instruction was given. Averaging over all of them dilutes the very effect
-being measured, and a real language effect can vanish into the noise.
+Aggregate held-out error dilutes this — two tasks sharing a scene and differing only in the
+instruction also share approach/grasp phases, so most frames carry no signal either way. Instead,
+for each frame recorded under instruction A, run the policy on the same pixels under both A and its
+paired instruction B, and compare `|predict(obs,A) - target|` against `|predict(obs,B) - target|`.
 
-This measures the mechanism directly instead. For a frame recorded under instruction A, the policy
-is run twice on the *same pixels* — once with A, once with its paired instruction B:
-
-    err_factual        = |predict(obs, A) - recorded_actions|
-    err_counterfactual = |predict(obs, B) - recorded_actions|
-    divergence         = |predict(obs, A) - predict(obs, B)|
-
-Three outcomes, all informative:
-
-* `divergence ~ 0` — the policy ignores language entirely. For a policy with no language input at
-  all (ACT) this is true by construction, and the run is a sanity check on the harness.
-* `divergence > 0` but `err_counterfactual ~ err_factual` — the sentence perturbs the output without
-  steering it anywhere useful.
-* `err_counterfactual > err_factual` — swapping the instruction makes the prediction measurably
-  worse against the recording. That is the signature of language actually being followed, and the
-  gap size is how much it is worth.
-
-A null result here is not automatically a fault in the policy: if the two destinations are
-distinguishable in the frame (only one basket in shot, say), the task never required the sentence
-and there is nothing for the policy to use. Read the outcome together with the dataset.
+Divergence near zero means language is being ignored (expected for ACT — a harness sanity check).
+Divergence with counterfactual error worse than factual is the signature of language actually being
+followed. A null result isn't necessarily a policy fault — if the scene alone disambiguates the task
+(one basket in shot), there was nothing for language to add.
 
 Usage:
 
@@ -78,9 +62,8 @@ def build_observation(samples, resize: int) -> dict:
         if not key.startswith("observation."):
             continue
         stacked = torch.stack([s[key] for s in samples])
-        # `_is_pad` companions share the image prefix but are 1-D boolean masks, not frames. They
-        # appear whenever a policy sets `observation_delta_indices` (SmolVLA does, ACT does not).
-        if key.startswith("observation.images.") and not key.endswith("_is_pad") and resize:
+        # Rank check, not a name check: `*_is_pad` mask keys share the image prefix but are 1-D/2-D.
+        if key.startswith("observation.images.") and stacked.dim() >= 4 and resize:
             stacked = stacked.float()
             if stacked.max() > 1.5:
                 stacked = stacked / 255.0

@@ -128,20 +128,13 @@ def main():
     print(f"held-out : {len(eval_episodes)} episodes (eval_split={args.eval_split})")
     print(f"horizon  : {horizon} steps  (native: {native})")
 
-    def build_dataset(ckpt_path: str) -> LeRobotDataset:
-        """One dataset per run, shaped by that run's own `delta_timestamps`.
-
-        A single shared dataset does not work when comparing runs: `observation_delta_indices`
-        differs between policies (SmolVLA's is `[0]`, ACT's/TurboVLA's is None), and a non-None
-        value makes LeRobot add a leading time axis to every observation plus `*_is_pad`
-        companions. Handing SmolVLA-shaped observations to a policy that expects unshaped ones
-        fails with a shape mismatch inside its encoder, so whichever policy happened to be first on
-        the command line would silently decide the layout for all the others.
-
-        Rebuilding is cheap -- metadata and frames are already cached -- and it does not disturb
-        comparability: the episode list is identical, LeRobot orders frames by episode regardless of
-        `delta_timestamps`, so a given index refers to the same frame for every run.
-        """
+    # `delta_timestamps` is derived per-policy (it encodes `observation_delta_indices`, which is
+    # `[0]` for a policy like SmolVLA that stacks a short observation history and `None` for one
+    # that doesn't, e.g. ACT/TurboVLA). A dataset built once from the first run's config and then
+    # reused would hand every other run observations shaped for a different policy -- so each run
+    # gets its own `LeRobotDataset`, keyed by its own checkpoint's config. This is cheap since the
+    # underlying frames/metadata are cached by lerobot regardless of how many times we instantiate.
+    def _dataset_for(ckpt_path: str) -> LeRobotDataset:
         cfg = PreTrainedConfig.from_pretrained(ckpt_path)
         cfg.chunk_size = horizon
         cfg.n_action_steps = min(cfg.n_action_steps, horizon)
@@ -152,8 +145,8 @@ def main():
             return_uint8=True,
         )
 
-    reference = build_dataset(runs[0][1][0][1])
-    frames_by_task = select_frames(reference, args.max_frames_per_task)
+    anchor_dataset = _dataset_for(runs[0][1][0][1])
+    frames_by_task = select_frames(anchor_dataset, args.max_frames_per_task)
     n_frames = sum(len(v) for v in frames_by_task.values())
     print(f"frames   : {n_frames} over {len(frames_by_task)} tasks\n")
 
@@ -161,11 +154,14 @@ def main():
     per_task_scores: dict[tuple[str, int], dict[str, float]] = {}
     for name, ckpts in runs:
         curves[name] = []
-        dataset = build_dataset(ckpts[0][1])
-        if dataset.num_frames != reference.num_frames:
+        dataset = _dataset_for(ckpts[0][1])
+        # `frames_by_task` holds indices picked against `anchor_dataset`; they're only valid here if
+        # this run's dataset enumerates the same frame count in the same order, which holds as long
+        # as episode selection (fixed above) is the only thing determining frame order.
+        if dataset.num_frames != anchor_dataset.num_frames:
             raise SystemExit(
-                f"{name}: dataset has {dataset.num_frames} frames against the reference's "
-                f"{reference.num_frames}; the selected indices would not line up."
+                f"{name}: dataset has {dataset.num_frames} frames, anchor run has "
+                f"{anchor_dataset.num_frames}; frame indices would not line up between the two."
             )
         for step, path in ckpts:
             policy, pre, post, _ = load_checkpoint(path, args.device)

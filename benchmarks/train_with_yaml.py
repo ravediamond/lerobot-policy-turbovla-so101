@@ -15,17 +15,11 @@
 # limitations under the License.
 """Run `lerobot-train` with a YAML overlay that the CLI cannot express.
 
-Why this exists: draccus builds its argument parser from dataclass *fields*, so the entries of a
-`dict[str, ...]` field have no CLI flags. `dataset.image_transforms.tfs` is such a dict, which means
-there is no way to say "resize every frame to 224x224" on the command line — and
-`lerobot-train --config_path=...` cannot be borrowed for it either, because `TrainPipelineConfig`
-defines `from_pretrained`, so the CLI routes `--config_path` to a checkpoint loader instead of to
-draccus's YAML overlay.
-
-This launcher takes the one path that is left: parse the YAML overlay plus the usual CLI flags into
-a config object, then hand that object straight to `train()`. LeRobot's `@parser.wrap()` returns
-early when it is passed an already-built config, so nothing is re-parsed and behaviour is otherwise
-identical to `lerobot-train`.
+`dataset.image_transforms.tfs` is a `dict[str, ...]` field, so draccus gives it no CLI flags — and
+`--config_path=` on the real `lerobot-train` binary is claimed by `TrainPipelineConfig.from_pretrained`
+for checkpoint loading, not draccus's YAML overlay. This launcher parses the overlay + CLI flags into
+a config directly and hands it to `train()`; `@parser.wrap()` skips re-parsing an already-built
+config, so behavior otherwise matches `lerobot-train`.
 
 Usage:
 

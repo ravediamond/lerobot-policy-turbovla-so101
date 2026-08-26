@@ -231,12 +231,8 @@ class TurboVLA(nn.Module):
 
         self._set_frozen_backbones_to_eval()
 
-        # Only the fusion + decoder stack is compiled: the backbones are separate pretrained
-        # `transformers` modules, and DINOv3/BERT are unlikely to benefit as much (fixed shapes
-        # already, and re-tracing on every unfrozen fine-tune step would fight the whole point of
-        # caching a compiled graph). `forward` covers both training and inference — there's a single
-        # decode path, unlike a flow-matching policy with separate one-shot vs. iterative-denoise
-        # forwards to compile independently.
+        # Only fusion + decoder is compiled — the backbones are separate pretrained `transformers`
+        # modules and gain less from tracing.
         if config.compile_model:
             torch.set_float32_matmul_precision("high")
             self.forward = torch.compile(self.forward)

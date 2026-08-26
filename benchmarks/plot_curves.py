@@ -15,24 +15,14 @@
 # limitations under the License.
 """Plot the two curves a training run needs, from artifacts already on disk.
 
-Held-out MAE vs step is the evidence: it says how well the policy predicts actions on frames it
-never trained on, and at which budget. Training loss vs step is the health check that has to be
-read first -- it shows whether the run actually converged, and (when comparing runs) whether they
-converged *comparably*. A MAE gap between a run that plateaued and one still descending is not an
-architecture result, it is a statement that one run was too short.
+Loss is the convergence health check (read first — a plateaued run vs. a still-descending one
+changes what a MAE gap means). Held-out MAE is the actual evidence of prediction quality on unseen
+frames. Loss is parsed from `lerobot-train`'s stdout log; MAE comes from `eval_curve.py --json` so
+replotting doesn't re-run the evaluation. Neither needs a GPU.
 
-The two come from different places and neither needs a GPU:
-
-* training loss is parsed out of the `lerobot-train` stdout logs (`outputs/*.log`), which is
-  where it lives when `--wandb.enable=false`;
-* held-out MAE is read from the JSON that `eval_curve.py --json` writes, so re-plotting never
-  re-runs the evaluation.
-
-When plotting more than one run, losses are NOT comparable across policies in absolute terms -- ACT's
-total includes a KL term TurboVLA has no analogue for, and each policy normalizes its action space
-its own way. The loss panel is for reading the *shape* of each curve. Only the MAE panel, where
-every policy is scored on identical held-out frames at one common horizon with the same normalizer,
-compares across policies.
+Loss is not comparable across policies (different loss terms, different action normalization) —
+read its panel for shape only. MAE is comparable, since `eval_curve.py` fixes the frames/horizon/
+normalizer across runs.
 
 Usage
 -----
@@ -46,14 +36,10 @@ import json
 import re
 from pathlib import Path
 
-# The step count in the log text is NOT usable: lerobot-train prints it through a human-readable
-# formatter, so step 5600 appears as `step:6K` and everything from 1000 up collapses into a handful
-# of rounded labels. The exact count is in the tqdm bar that precedes each log line -- the bar and
-# the INFO line share a line because tqdm writes carriage returns to the same stream:
-#
-#     Training: 93%|#########3| 5600/6000 [7:19:13<31:18, 4.70s/step]INFO ... step:6K ... loss:0.349
-#
-# so anchor on the bar's `<done>/<total>` and take the loss from the INFO text that follows it.
+# lerobot-train's `step:6K`-style label is rounded and useless past 1000; the exact count lives in
+# the tqdm bar sharing the line (carriage-return writes to the same stream), e.g.:
+#   Training: 93%|#########3| 5600/6000 [...]INFO ... step:6K ... loss:0.349
+# so pull the step from the bar's `<done>/<total>` and the loss from the INFO text after it.
 STEP_LOSS = re.compile(r"(\d+)/\d+ \[[^\]]*\]INFO[^\n]*?\bloss:([0-9.]+)")
 
 

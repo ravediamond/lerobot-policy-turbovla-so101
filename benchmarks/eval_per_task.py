@@ -197,11 +197,11 @@ def select_frames(dataset: LeRobotDataset, max_per_task: int) -> dict[str, list[
 def evaluate(policy, preprocessor, postprocessor, dataset, frames_by_task, args, horizon=None):
     """Mean absolute action-chunk error per task, in the dataset's action units.
 
-    `horizon` caps how many steps of the chunk are scored. Left as None, each batch is scored over
-    as much of the chunk as both the prediction and the target provide, which is what a single
-    policy wants. Comparing policies needs it pinned instead: mean absolute error grows with
-    prediction horizon, so a policy scored over 12 steps and one scored over 50 are not on the same
-    scale no matter which is actually better.
+    By default (`horizon=None`) every step the model and dataset both provide gets scored, which is
+    the right call for one policy on its own. It stops being right once two policies with different
+    native chunk sizes are compared: MAE accumulates over the scored window, so truncating one run
+    to 12 steps and letting another run to 50 makes the shorter one look artificially better. Pass
+    a fixed `horizon` to pin every run to the same window before comparing their numbers.
     """
     results = {}
 
@@ -217,11 +217,13 @@ def evaluate(policy, preprocessor, postprocessor, dataset, frames_by_task, args,
                 if not key.startswith("observation."):
                     continue
                 stacked = torch.stack([s[key] for s in samples])
-                # `_is_pad` companions are boolean masks, not frames. They only appear for policies
-                # whose `observation_delta_indices` is set (SmolVLA's is `[0]`, ACT's is None), and
-                # they share the `observation.images.` prefix, so a prefix test alone routes a
-                # 1-D mask into the image resize and fails there.
-                if key.startswith("observation.images.") and not key.endswith("_is_pad") and args.resize:
+                # Match camera keys by shape, not by name. A policy with `observation_delta_indices`
+                # set (e.g. one that stacks a short history) also emits an `*_is_pad` boolean mask
+                # per camera key with the same `observation.images.` prefix -- a plain prefix test
+                # would route that 1-D mask into the resize call below and crash. Requiring rank 4+
+                # (batch, channel, H, W, ...) is a structural check that holds regardless of what a
+                # future companion key happens to be named.
+                if key.startswith("observation.images.") and stacked.dim() >= 4 and args.resize:
                     stacked = stacked.float()
                     if stacked.max() > 1.5:  # uint8 frames arrive in [0, 255]
                         stacked = stacked / 255.0

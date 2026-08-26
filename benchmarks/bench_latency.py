@@ -15,27 +15,17 @@
 # limitations under the License.
 """Inference-latency benchmark: TurboVLA against other LeRobot policies.
 
-Latency depends on the architecture and the weights, not on how well a policy was trained, so this
-runs without training anything. It measures speed only — it says nothing about task success.
+Latency depends on architecture and weights, not training quality, so nothing here is trained.
+Speed only — no claim about task success.
 
-The protocol, and why each part of it is there:
+Every policy gets identical inputs (cameras/resolution/state/action/chunk) at batch 1 (the rollout
+case), timed with a warmup pass and `torch.cuda.synchronize()` around each call so async GPU work
+isn't undercounted. Median + p10/p90 reported, not mean. Both `chunk_ms` (one forward pass) and
+`step_ms` (amortized over `n_action_steps`, what the robot actually sees) are reported — either one
+alone is a partial picture.
 
-- **Identical inputs.** Every policy sees the same camera count, resolution, state dim, action dim
-  and chunk size. A policy timed at a different resolution is not being compared.
-- **Batch size 1**, because that is the rollout case. Throughput at batch 64 is a different question.
-- **Warmup before timing.** The first calls pay for kernel autotuning and lazy allocation.
-- **`torch.cuda.synchronize()` around every call.** GPU work is asynchronous; timing without a sync
-  measures how fast Python queues kernels, which is not a number anyone wants.
-- **Median, not mean**, so one scheduler hiccup does not move the headline. p10/p90 show the spread.
-- **Two latencies, both reported.** `chunk_ms` is one forward pass. `step_ms` is what the robot
-  experiences, since action chunking amortizes that pass over `n_action_steps` — which is the whole
-  point of predicting a chunk. Quoting only one of the two tells half the story, and quoting only
-  `step_ms` is the flattering half.
-
-A note on resolution when comparing against ACT: TurboVLA resizes to a square `image_size` because a
-ViT needs a fixed patch grid, while ACT's ResNet consumes whatever it is given. Benchmarking both at
-224px is therefore ACT's best case and the conservative choice for TurboVLA. Use `--resolution` to
-check the native-resolution case too, and report which one you quoted.
+224px is ACT's best case (its ResNet takes any resolution; TurboVLA's ViT needs a fixed patch grid
+and resizes to it). Pass `--resolution` for the native-ish case and say which one you're quoting.
 
 Usage:
 

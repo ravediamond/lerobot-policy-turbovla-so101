@@ -15,19 +15,12 @@
 # limitations under the License.
 """Bidirectional vision-language interaction, the core of TurboVLA.
 
-`N` identical layers run *both* cross-attention directions:
+Each of the `N` layers runs vision->text and text->vision cross-attention off the same pre-update
+snapshot, so both directions update simultaneously rather than chaining. The paper's ablation shows
+this beats single-direction fusion (97.7% vs 96.1-96.5%).
 
-    vision -> text   injects scene context into the instruction tokens
-    text   -> vision conditions the patch features on task semantics
-
-Both directions read the same pre-update snapshot of the other stream, so the two updates are
-genuinely simultaneous rather than a chained one-way pass. The ablation in the paper puts
-bidirectional at 97.7% against 96.1-96.5% for a single direction, so this is not a detail to
-simplify away.
-
-All attention goes through `torch.nn.functional.scaled_dot_product_attention`. That is the
-portability layer: it picks a working backend on ROCm/gfx1201 and on the CUDA images used by
-Hugging Face Jobs, with no `flash-attn` dependency in sight.
+Attention runs through `scaled_dot_product_attention` for backend portability (ROCm/gfx1201, HF
+Jobs CUDA images) without a `flash-attn` dependency.
 """
 
 import torch
@@ -154,8 +147,7 @@ class TurboVLAFusionLayer(nn.Module):
         vision_normed = self.norm_vision_attn(vision)
         text_normed = self.norm_text_attn(text)
 
-        # Both reads use the pre-update snapshot above — this is what makes the fusion bidirectional
-        # rather than two chained one-way passes.
+        # Both branches read the pre-update snapshot, so neither direction sees the other's result.
         vision = vision + self.dropout(
             self.text_to_vision_attn(vision_normed, text_normed, key_padding_mask=text_padding_mask)
         )
