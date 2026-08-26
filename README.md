@@ -240,6 +240,13 @@ _Pending: SO-101 training run in progress. This section will report the real-arm
 inference latency on the actual rollout hardware, and a comparison against ACT trained on the same
 dataset — not simulator numbers._
 
+**Inference latency is measured, not pending** — see
+[`benchmarks/results/latency_jetson_orin_nx.md`](benchmarks/results/latency_jetson_orin_nx.md) for
+TurboVLA vs ACT vs SmolVLA on a Jetson Orin NX 16GB. TurboVLA is 5.5x slower than ACT and 7.0x
+faster than SmolVLA per chunk, same ranking as reported elsewhere on discrete GPUs. This is
+architecture-only latency (synthetic inputs, no weights trained on this hardware) — task success
+still needs the real-arm rollout above.
+
 ## Dataset requirements
 
 - At least one `observation.images.*` key. Several are treated as multiple camera views, each
