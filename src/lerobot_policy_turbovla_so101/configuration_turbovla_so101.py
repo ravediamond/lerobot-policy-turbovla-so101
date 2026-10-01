@@ -67,6 +67,11 @@ class TurboVLAConfig(PreTrainedConfig):
         image_size: Images are resized to this square resolution before the vision backbone. Must be
             divisible by the backbone's patch size (16 for the `dinov3-vit*16` family).
         max_language_tokens: Max instruction length in tokens; longer instructions are truncated.
+        use_text_pos_embed: Add a learned position embedding to the projected instruction tokens before
+            fusion. The fusion cross-attention treats the tokens as an unordered set, so without it word
+            order only reaches the trunk through BERT's contextual features (weak when BERT is frozen):
+            "put the blue bowl in the pink bowl" and "put the pink bowl in the blue bowl" are the same
+            token set. Zero-initialized, so enabling it on an existing checkpoint starts as a no-op.
         dim_model: The shared width `d` of the fusion trunk and the action decoder.
         n_heads: Number of attention heads in the fusion and decoder blocks.
         dim_feedforward: Hidden width of the feed-forward layers.
@@ -113,6 +118,7 @@ class TurboVLAConfig(PreTrainedConfig):
     freeze_language_backbone: bool = True
     image_size: int = 224
     max_language_tokens: int = 32
+    use_text_pos_embed: bool = False
 
     # Architecture: shared trunk.
     dim_model: int = 256

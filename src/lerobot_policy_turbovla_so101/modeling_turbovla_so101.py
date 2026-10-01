@@ -209,6 +209,9 @@ class TurboVLA(nn.Module):
         # Project both modalities into the shared width `d`.
         self.vision_proj = nn.Linear(vision_width, config.dim_model)
         self.language_proj = nn.Linear(language_width, config.dim_model)
+        # Optional: token order for the instruction (see `use_text_pos_embed`). Zero init = no-op at load.
+        if config.use_text_pos_embed:
+            self.text_pos_embed = nn.Parameter(torch.zeros(1, config.max_language_tokens, config.dim_model))
 
         # Where a patch is in the frame, and which camera it came from. The camera-view embedding is
         # what keeps views apart as soon as there is more than one.
@@ -320,6 +323,8 @@ class TurboVLA(nn.Module):
         # Token-level, deliberately *not* pooled — pooling is what loses the object / attribute /
         # spatial-relation grounding this policy depends on.
         text_tokens = self.language_proj(out.last_hidden_state)
+        if self.config.use_text_pos_embed:
+            text_tokens = text_tokens + self.text_pos_embed[:, : text_tokens.shape[1]]
         return text_tokens, attention_mask.to(torch.bool)
 
     def forward(self, batch: dict[str, Tensor]) -> Tensor:
