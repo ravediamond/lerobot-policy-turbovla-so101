@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 # LeRobot discovers third-party policies by walking installed distributions and importing every 
 # one whose name starts with it (see `lerobot.utils.import_utils.register_third_party_plugins`).
 name = "lerobot_policy_turbovla_so101"
-version = "0.1.0"
+version = "0.2.0"
 description = "TurboVLA as a drop-in LeRobot policy, validated on a real SO-101 arm: --policy.type=turbovla_so101"
 readme = "README.md"
 requires-python = ">=3.12"

@@ -77,6 +77,9 @@ class TurboVLAConfig(PreTrainedConfig):
         optimizer_lr: Peak learning rate for the newly initialized trunk.
         optimizer_lr_backbone: Learning rate for the pretrained backbones. Ignored for whichever
             backbones are frozen.
+        optimizer_betas: AdamW (beta1, beta2). The paper uses (0.9, 0.95), not AdamW's own
+            default (0.9, 0.999) -- this was previously hardcoded to the AdamW default since
+            `get_optimizer_preset` never passed it through.
         temporal_ensemble_coeff: Coefficient for exponentially-weighted temporal ensembling across
             overlapping action chunks (as in ACT's Algorithm 2), which smooths out the visible
             per-chunk jitter a single-shot decoder like this one otherwise has at rollout. `None`
@@ -123,11 +126,15 @@ class TurboVLAConfig(PreTrainedConfig):
     n_fusion_layers: int = 6
     n_decoder_layers: int = 4
 
-    # Training preset.
+    # Training preset. These now actually match the paper's LIBERO recipe (Table 8): betas
+    # (0.9, 0.95) not AdamW's own (0.9, 0.999) default, weight_decay 1e-10 not 1e-4, grad_clip_norm
+    # 1.0 not 10.0. The previous defaults were a docstring/code mismatch -- the docstring already
+    # claimed "follows the paper's recipe" but these three didn't.
     optimizer_lr: float = 5e-5
-    optimizer_weight_decay: float = 1e-4
+    optimizer_betas: tuple[float, float] = (0.9, 0.95)
+    optimizer_weight_decay: float = 1e-10
     optimizer_lr_backbone: float = 5e-6
-    optimizer_grad_clip_norm: float = 10.0
+    optimizer_grad_clip_norm: float = 1.0
     scheduler_warmup_steps: int = 10_000
     scheduler_decay_steps: int = 80_000
     scheduler_decay_lr: float = 5e-7
@@ -166,6 +173,7 @@ class TurboVLAConfig(PreTrainedConfig):
     def get_optimizer_preset(self) -> AdamWConfig:
         return AdamWConfig(
             lr=self.optimizer_lr,
+            betas=self.optimizer_betas,
             weight_decay=self.optimizer_weight_decay,
             grad_clip_norm=self.optimizer_grad_clip_norm,
         )
