@@ -10,7 +10,12 @@
 
 TurboVLA as a standalone [LeRobot](https://github.com/huggingface/lerobot) policy plugin, trained
 and tested end-to-end on a real [SO-101](https://github.com/TheRobotStudio/SO-ARM100) arm, not
-just simulation. On a two-instruction real-arm task it does not work yet: see [Results](#results).
+just simulation.
+
+> **Status: not recommended, no longer developed.** On a real two-instruction task TurboVLA did not work: every
+> checkpoint ignored the instruction and the best one got 1/10, where ACT and SmolVLA got 9/10 or better on the same
+> arm and data ([Results](#results)). I'm stopping work on this plugin and moving on to testing other VLAs. The code
+> stays up as a working LeRobot port and a record of what was tried.
 
 ```bash
 lerobot-train --policy.type=act              ...   # before
@@ -22,7 +27,7 @@ policy and lets `lerobot-train` drive it; no fork of LeRobot itself, no custom h
 
 ## Contents
 
-- [Why TurboVLA instead of ACT](#why-turbovla-instead-of-act)
+- [TurboVLA vs ACT: the idea, and what happened](#turbovla-vs-act-the-idea-and-what-happened)
 - [Architecture](#architecture)
 - [Install](#install)
 - [Train](#train)
@@ -35,9 +40,9 @@ policy and lets `lerobot-train` drive it; no fork of LeRobot itself, no custom h
 - [Attribution](#attribution)
 - [License](#license)
 
-## Why TurboVLA instead of ACT
+## TurboVLA vs ACT: the idea, and what happened
 
-Same ergonomics as ACT (chunked continuous actions, parallel decode, L1 loss), but language
+The idea was the same ergonomics as ACT (chunked continuous actions, parallel decode, L1 loss), but language
 conditioned:
 
 |                 | ACT                    | TurboVLA                            |
@@ -47,9 +52,14 @@ conditioned:
 | Action decode   | parallel chunk queries  | parallel chunk queries (same idea)  |
 | Params          | ~80M                    | ~0.2B                                |
 
-The practical win on a multi-task arm dataset: ACT ignores the task string, so you need one
-checkpoint per task. TurboVLA conditions on it, so one checkpoint can cover many tasks in the same
-dataset.
+The hoped-for win on a multi-task arm dataset: ACT ignores the task string, so you need one
+checkpoint per task, while TurboVLA conditions on it, so one checkpoint could cover many tasks.
+
+In practice it didn't hold up. On a real SO-101 the trained checkpoints barely react to the
+instruction (about 0.2 degrees of change in the predicted actions when the instruction is swapped),
+so the language conditioning, the whole reason to pick it over ACT, doesn't work on this kind of
+task. A single-task ACT is the better choice here, and for language-conditioned multi-task work a
+VLM-based policy like SmolVLA did work on the same rig. Details in [Results](#results).
 
 Upstream research code: <https://github.com/H-EmbodVis/TurboVLA>; paper
 [arXiv:2607.27205](https://arxiv.org/abs/2607.27205). Only the modules were ported here, not the
