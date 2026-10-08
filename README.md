@@ -8,9 +8,9 @@
   <a href="https://arxiv.org/abs/2607.27205"><img src="https://img.shields.io/badge/Paper-arXiv-b31b1b.svg" alt="Paper"></a>
 </p>
 
-TurboVLA as a standalone [LeRobot](https://github.com/huggingface/lerobot) policy plugin — trained
-and validated end-to-end on a real [SO-101](https://github.com/TheRobotStudio/SO-ARM100) arm, not
-just simulation.
+TurboVLA as a standalone [LeRobot](https://github.com/huggingface/lerobot) policy plugin, trained
+and tested end-to-end on a real [SO-101](https://github.com/TheRobotStudio/SO-ARM100) arm, not
+just simulation. On a two-instruction real-arm task it does not work yet: see [Results](#results).
 
 ```bash
 lerobot-train --policy.type=act              ...   # before
@@ -236,16 +236,42 @@ For the paper's RoboTwin recipe, raise `--policy.chunk_size=50` and switch to a 
 
 ## Results
 
-_Pending: SO-101 training run in progress. This section will report the real-arm task success rate,
-inference latency on the actual rollout hardware, and a comparison against ACT trained on the same
-dataset — not simulator numbers._
+**No checkpoint of this plugin solves the real-arm task I trained it on.** Numbers below are from a real SO-101
+(Jetson Orin NX and M1 Mac), one rig, one dataset, small trial counts.
 
-**Inference latency is measured, not pending** — see
+Task: [`ravediamond/so101_bowls_all`](https://huggingface.co/datasets/ravediamond/so101_bowls_all), 182 teleop
+episodes, two instructions ("Put the blue bowl in the pink bowl." / "Put the pink bowl in the blue bowl.") over the
+same scenes, so only the instruction tells the policy which bowl to move. Trials are 25 s, blue into pink.
+
+| Policy | Checkpoint | Real arm |
+|---|---|---|
+| TurboVLA, 35k steps | [`turbovla_so101_bowls`](https://huggingface.co/ravediamond/turbovla_so101_bowls) | never leaves the rest pose |
+| + idle starts trimmed (5k fine-tune) | [`turbovla_so101_bowls_trimmed`](https://huggingface.co/ravediamond/turbovla_so101_bowls_trimmed) | 1/10 |
+| + single-task fine-tune (blue into pink only) | [`turbovla_so101_bowls_blue_in_pink`](https://huggingface.co/ravediamond/turbovla_so101_bowls_blue_in_pink) | 1/4 |
+| + relabelled instructions, paired batches | [`turbovla_so101_bowls_relabeled_paired`](https://huggingface.co/ravediamond/turbovla_so101_bowls_relabeled_paired) | 0/2 |
+| fresh, paper optimizer recipe (v0.2.0) + EMA | [`turbovla_so101_bowls_v2`](https://huggingface.co/ravediamond/turbovla_so101_bowls_v2) | 0/3 |
+| ACT (single task, reference) | | 10/10 M1, 9/10 Orin NX |
+| SmolVLA (both tasks, reference) | | 9/10 M1, 9/10 Orin NX |
+
+What goes wrong, consistently across every variant:
+
+- **The instruction barely changes the actions.** Swapping blue and pink in the instruction moves the predicted chunk
+  by 0.1 to 0.35 degrees, against 7 to 13 degrees for SmolVLA on the same frames. The text path is not dead (the
+  decoder attends to text tokens and an auxiliary "which bowl" head on the decoder states reaches 98% accuracy), but
+  the action head does not use it.
+- **On the arm** that shows up as a task coin flip or a position habit (v2 went to the right hand bowl in all three
+  tries, also with the bowls swapped) and as hesitation: hovering at the rim with the gripper open instead of grasping.
+- The likely cause is the short horizon: with 12 steps (0.4 s) and the arm state as input, the instruction is needed
+  on only about 6% of training frames, so the cheapest fit continues the arm's current motion. A longer chunk
+  (50 to 100 steps, as SmolVLA and ACT use), state dropout, or a multimodal action head are the untested next steps.
+
+Inference on the arm (Orin NX, `lerobot-jetson` Docker, sync inference): ~119 ms per 12-action chunk, ~24.5 Hz
+control loop, 828 MB torch memory peak.
+
+Architecture-only latency (synthetic inputs) is in
 [`benchmarks/results/latency_jetson_orin_nx.md`](benchmarks/results/latency_jetson_orin_nx.md) for
 TurboVLA vs ACT vs SmolVLA on a Jetson Orin NX 16GB. TurboVLA is 5.5x slower than ACT and 7.0x
-faster than SmolVLA per chunk, same ranking as reported elsewhere on discrete GPUs. This is
-architecture-only latency (synthetic inputs, no weights trained on this hardware) — task success
-still needs the real-arm rollout above.
+faster than SmolVLA per chunk, same ranking as reported elsewhere on discrete GPUs.
 
 ## Dataset requirements
 
