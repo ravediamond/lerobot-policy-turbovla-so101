@@ -10,12 +10,15 @@
 
 TurboVLA as a standalone [LeRobot](https://github.com/huggingface/lerobot) policy plugin, trained
 and tested end-to-end on a real [SO-101](https://github.com/TheRobotStudio/SO-ARM100) arm, not
-just simulation.
+just simulation. Since v0.3.0 the network **is the authors' own code** (vendored from
+[`H-EmbodVis/TurboVLA`](https://github.com/H-EmbodVis/TurboVLA) @ `a3365e8`), with a parity test that checks the
+plugin reproduces upstream's outputs, and the released LIBERO checkpoint loads into it.
 
-> **Status: not recommended, no longer developed.** On a real two-instruction task TurboVLA did not work: every
-> checkpoint ignored the instruction and the best one got 1/10, where ACT and SmolVLA got 9/10 or better on the same
-> arm and data ([Results](#results)). I'm stopping work on this plugin and moving on to testing other VLAs. The code
-> stays up as a working LeRobot port and a record of what was tried.
+> **Status (v0.3.0): faithful port, real-arm results to redo.** Up to v0.2.0 this plugin was *not* the paper's
+> model: it differed from upstream in six places (table below), and every real-arm result in [Results](#results) comes
+> from that port. v0.3.0 replaces the network with upstream's own code. A faithful run with upstream's own trainer
+> on the same data also ignored the instruction, so the old conclusion is expected to hold at the paper's 12-step chunk;
+> the open question is whether a longer chunk (the paper uses 50 steps on RoboTwin) fixes it.
 
 ```bash
 lerobot-train --policy.type=act              ...   # before
@@ -70,19 +73,36 @@ dependency this package avoids.
 
 ![TurboVLA architecture: DINOv3 vision and BERT language tokens through six bidirectional cross-attention layers into an ACT-style parallel action decoder](docs/architecture.png)
 
-Important things:
+The network is upstream's `TurboVLA` module, vendored unchanged in
+[`src/lerobot_policy_turbovla_so101/upstream/`](src/lerobot_policy_turbovla_so101/upstream) (Apache-2.0; each file's
+header lists what was touched: import paths, building backbones offline, and two transformers-5 compatibility fixes).
+Parameter names are upstream's, so upstream checkpoints load directly.
 
-- **Bidirectional fusion.** Both directions run every layer: vision→text injects scene context,
-  text→vision conditions patch features on task semantics. Both read the same pre-update snapshot,
-  so the updates are simultaneous rather than chained. The paper's ablation puts bidirectional at
-  97.7% against 96.1–96.5% for one-way.
-- **Token-level language**, not a pooled sentence embedding — that is what preserves object,
-  attribute and spatial-relation grounding.
-- **Camera-view embeddings** distinguish which camera a patch came from, needed as soon as there is
-  more than one camera.
-- **Plain L1** on the action chunk. No VAE and no KL term, so ACT's `use_vae` / `latent_dim` /
-  `kl_weight` have no analogue here.
-- All attention goes through `torch.nn.functional.scaled_dot_product_attention`. No `flash-attn`.
+- **DINOv3 ViT-B/16 per camera, trainable**, 256 px → VisionProjection (LayerNorm, MLP + linear skip, LayerNorm) + a
+  learned view embedding.
+- **Frozen BERT-base** with Grounding DINO's sub-sentence attention masks (split on `[CLS]`/`[SEP]`/`.`/`?`), padded to
+  21 tokens → linear projection.
+- **6 interaction layers**, each a Grounding-DINO `BiAttentionBlock` (one shared vision-text affinity, softmaxed both
+  ways; layer-scale initialised at 1e-4; drop-path 0.1) followed by a text self-attention layer.
+- **Robot state → 2 tokens appended to the fused memory** (not to the vision tokens before fusion).
+- **ACT-style decoder**: 3 pre-norm layers, FFN 2048, 12 learned queries → 3-layer MLP → `tanh`. Actions are min-max
+  normalised to [-1, 1]; state is z-scored. Masked L1 loss.
+
+### What changed from v0.2.0 (the port the old results come from)
+
+| # | Upstream (= v0.3.0) | v0.2.0 port |
+|---|---|---|
+| 1 | Interaction layers from Grounding DINO / the LIBERO checkpoint | random init |
+| 2 | `BiAttentionBlock` (shared affinity, layer-scale 1e-4) + text self-attention | two independent cross-attentions, full residuals, no text self-attention |
+| 3 | state → 2 tokens into the decoder memory, after fusion | 1 token prepended to the vision tokens, through all 6 fusion layers |
+| 4 | VisionProjection MLP, 3 decoder layers, FFN 2048, MLP head + tanh, 256 px, DINOv3 trainable | one Linear, 4 layers, FFN 1024, linear head, 224 px, DINOv3 frozen |
+| 5 | actions min-max to [-1, 1] (tanh head) | mean/std |
+| 6 | AdamW default betas (0.9, 0.999), warmup 0.1→1 then constant LR | betas (0.9, 0.95), cosine decay |
+
+Two traps found while porting to transformers 5 (both covered by `tests/test_upstream_parity.py`): DINOv3's
+`hidden_states[-1]` is the *pre*-norm output in transformers 5 but the normalised one in 4.56 (upstream's version), so
+the plugin reads `last_hidden_state`; and transformers 5 nests DINOv3's blocks under `.model`, which the checkpoint
+loader maps explicitly.
 
 ## Install
 
@@ -172,82 +192,72 @@ Without that you get a 401 at model construction. Two ways around it:
 
 ## Train
 
-### Local
+### The paper's real-robot recipe: start from the LIBERO checkpoint
 
 ```bash
 lerobot-train \
-  --dataset.repo_id=${HF_USER}/so101_pickplace \
+  --dataset.repo_id=${HF_USER}/so101_bowls_all_trimmed \
   --policy.type=turbovla_so101 \
-  --policy.device=cuda \
-  --batch_size=64 \
-  --steps=80000 \
-  --output_dir=outputs/train/turbovla_so101 \
-  --job_name=turbovla_so101 \
-  --wandb.enable=true
+  --policy.upstream_init_checkpoint=hf://H-EmbodVis/TurboVLA/checkpoints/libero/turbovla_libero.pth \
+  --policy.camera_order='[observation.images.front_top_camera,observation.images.wrist_camera]' \
+  --policy.device=cuda --policy.push_to_hub=false \
+  --batch_size=64 --steps=35000 \
+  --output_dir=outputs/train/turbovla_so101
 ```
 
-Point `--dataset.repo_id` at any community LeRobot dataset to smoke-test the policy before a robot
-is involved.
+Every tensor whose shape matches is loaded; the robot-dependent ones (state / action width, and the action queries if
+`chunk_size` != 12) keep their fresh init, and the log lists them. Put the third-person camera first in
+`camera_order`: LIBERO's view 0 is the third-person view, view 1 the wrist. The init checkpoint is only read when
+training starts; a trained policy reloads without it. The paper fine-tunes its real-robot policies from this
+checkpoint (12.5k steps on 4 × 65 demos).
+
+Memory: DINOv3 is trained, so batch 128 does not fit 24 GB; batch 64 does (0.78 s/step on an RTX PRO 4000).
+
+### Longer chunks, state dropout
+
+```bash
+  --policy.chunk_size=50 --policy.n_action_steps=50     # the paper's RoboTwin horizon
+  --policy.state_dropout_prob=0.3                       # plugin-only, not in the paper; off by default
+```
 
 ### Multi-GPU
 
-`lerobot-train` supports `torchrun --nproc_per_node=N`, and `--batch_size` is then per rank (two
-ranks at 128 give the global 256 of the paper's LIBERO recipe). Nothing in this policy is
-single-device specific.
-
-Be aware that multi-GPU needs working GPU collectives (NCCL/RCCL), which are a property of your
-PyTorch build rather than of this package. Verify with a bare all-reduce before committing to a long
-run. If that fails, so will any distributed training, for any policy. Single-GPU training is
-unaffected; raise `--batch_size` to reach a comparable effective batch.
-
-### Hugging Face Jobs
-
-Nothing in this package is ROCm-specific, so the identical command runs on a rented NVIDIA box:
+`lerobot-train` supports `torchrun --nproc_per_node=N`, and `--batch_size` is then per rank (upstream's LIBERO recipe
+is a global batch of 128). Resume works as usual:
 
 ```bash
-lerobot-train \
-  --dataset.repo_id=${HF_USER}/so101_pickplace \
-  --policy.type=turbovla_so101 \
-  --policy.repo_id=${HF_USER}/turbovla-so101 \
-  --job.target=a10g-small \
-  --save_checkpoint_to_hub=true
-```
-
-Resume works the same everywhere:
-
-```bash
-lerobot-train --config_path=${HF_USER}/turbovla-so101 --resume=true
+lerobot-train --config_path=outputs/train/turbovla_so101/checkpoints/last/pretrained_model/train_config.json --resume=true
 ```
 
 ## Configuration
 
-Defaults follow the paper's LIBERO recipe, which is also a sane starting point for SO-101 real-arm
-data: 6-DoF + gripper is close to the 7-D case, and `chunk_size=12` at 30 fps is a reasonable chunk.
+Defaults are upstream's released LIBERO recipe (`experiments/libero/README.md` and the trainer's defaults).
 
-| Flag                                | Default                                    | Notes                                                      |
-| ------------------------------------ | ------------------------------------------- | ------------------------------------------------------------ |
-| `--policy.chunk_size`                | `12`                                        | `H`, the number of action queries                           |
-| `--policy.n_action_steps`            | `12`                                        | steps executed per model call; ≤ `chunk_size`               |
-| `--policy.dim_model`                 | `256`                                       | shared width `d`                                            |
-| `--policy.n_fusion_layers`           | `6`                                         | `N` bidirectional layers                                    |
-| `--policy.n_decoder_layers`          | `4`                                         | action decoder depth                                        |
-| `--policy.vision_backbone`           | `facebook/dinov3-vitb16-pretrain-lvd1689m`  | gated; see above                                             |
-| `--policy.language_backbone`         | `google-bert/bert-base-uncased`             | swappable (paper: T5-small 97.1%)                            |
-| `--policy.freeze_vision_backbone`    | `true`                                      | dominates VRAM and final quality                             |
-| `--policy.freeze_language_backbone`  | `true`                                      | as above                                                     |
-| `--policy.load_pretrained_backbones` | `true`                                      | `false` = random init, smoke tests only                      |
-| `--policy.image_size`                | `224`                                       | must divide by the backbone's patch size                     |
-| `--policy.optimizer_lr`              | `5e-5`                                      | peak LR for the trunk                                        |
-| `--policy.optimizer_lr_backbone`     | `5e-6`                                      | ignored while backbones are frozen                           |
-| `--policy.temporal_ensemble_coeff`   | `null`                                      | exponential chunk-blend smoothing; requires `n_action_steps=1` when set |
-| `--policy.compile_model`             | `false`                                     | `torch.compile` the fusion + action-decoder stack             |
-
-For the paper's RoboTwin recipe, raise `--policy.chunk_size=50` and switch to a ViT-L backbone.
+| Flag | Default | Notes |
+|---|---|---|
+| `--policy.upstream_init_checkpoint` | `null` | upstream `.pth`, local or `hf://repo/file`; the paper's real-robot runs use the LIBERO one |
+| `--policy.chunk_size` / `n_action_steps` | `12` / `12` | `H`; the paper uses 50 on RoboTwin |
+| `--policy.camera_order` | dataset order | index of the view embedding; third-person first for the LIBERO init |
+| `--policy.image_size` | `256` | frames are resized (bilinear, antialiased) inside the policy |
+| `--policy.freeze_vision_backbone` / `freeze_language_backbone` | `false` / `true` | as upstream |
+| `--policy.vision_backbone` | `facebook/dinov3-vitb16-pretrain-lvd1689m` | gated, see Install |
+| `--policy.language_backbone` | `google-bert/bert-base-uncased` | |
+| `--policy.text_padding_length` | `21` | upstream's fixed text length |
+| `--policy.dim_model`, `n_heads`, `n_interaction_layers` | `256`, `8`, `6` | |
+| `--policy.n_decoder_layers`, `dim_feedforward` | `3`, `2048` | |
+| `--policy.optimizer_lr` / `optimizer_lr_backbone` | `5e-5` / `5e-5` | upstream's head / DINOv3 groups |
+| `--policy.optimizer_weight_decay` | `1e-10` | weight matrices only, as upstream |
+| `--policy.scheduler_warmup_steps` / `scheduler_min_lr_ratio` | `10000` / `1.0` | upstream's schedule (constant after warmup) |
+| `--policy.state_dropout_prob` | `0.0` | plugin-only; not in the paper |
+| `--policy.temporal_ensemble_coeff` | `null` | ACT-style chunk blending; requires `n_action_steps=1` |
 
 ## Results
 
-**No checkpoint of this plugin solves the real-arm task I trained it on.** Numbers below are from a real SO-101
-(Jetson Orin NX and M1 Mac), one rig, one dataset, small trial counts.
+**No checkpoint solves the real-arm task I trained it on.** The table is from the **v0.2.0 port** (not the paper's
+model, see [Architecture](#what-changed-from-v020-the-port-the-old-results-come-from)); real SO-101 (Jetson Orin NX and
+M1 Mac), one rig, one dataset, small trial counts. Offline only, upstream's own code and trainer on the same data
+(LIBERO init, 35k steps, batch 64) ignored the instruction as well: task swap 0.02°, per-layout probe 39% (chance),
+while the released checkpoint does react to instructions on LIBERO-Goal. v0.3.0 has not been run on the arm yet.
 
 Task: [`ravediamond/so101_bowls_all`](https://huggingface.co/datasets/ravediamond/so101_bowls_all), 182 teleop
 episodes, two instructions ("Put the blue bowl in the pink bowl." / "Put the pink bowl in the blue bowl.") over the
@@ -285,12 +295,9 @@ faster than SmolVLA per chunk, same ranking as reported elsewhere on discrete GP
 
 ## Dataset requirements
 
-- At least one `observation.images.*` key. Several are treated as multiple camera views, each
-  getting its own camera-view embedding; they must share a shape.
-- `observation.state` is optional — when present it is carried as one extra token into the fusion.
-- `action` is required.
-- **A task string is required.** It arrives as `task` in the batch and is the entire point of this
-  policy; `forward` raises if it is missing rather than quietly training a mute model.
+- At least one `observation.images.*` key (several = several views, one view embedding each).
+- `observation.state` (required: it conditions the action decoder).
+- A task string per episode: the instruction.
 
 ## Benchmarks and evaluation
 
@@ -382,7 +389,10 @@ pip install -e ".[test]"
 pytest -q
 ```
 
-The tests build a tiny randomly initialized model, so they need no Hub access and no GPU.
+Everything runs on CPU against tiny local backbones: no Hub access, no GPU. `tests/test_upstream_parity.py` loads a
+reference made with upstream's own code on transformers 4.56 (`tests/parity/make_upstream_reference.py`, rerun it
+against the pinned upstream commit to regenerate) and requires the plugin to reproduce its fused features and action
+chunks within 1e-5.
 
 ## Citation
 
@@ -404,22 +414,12 @@ TurboVLA itself is useful in your research, cite the paper:
 
 ## Attribution
 
-Portions of this package are adapted from an earlier Apache-2.0-licensed LeRobot port of TurboVLA;
-see `NOTICE` for the required statement. This repository is an independent continuation, not a
-GitHub fork, and adds:
-
-- End-to-end training and rollout validation on a real SO-101 arm (see [Results](#results)) —
-  the one thing neither this port nor the upstream research repo had before.
-- Temporal ensembling (exponential blending of overlapping action chunks across timesteps,
-  as in ACT's Algorithm 2) for smoother rollout at chunk boundaries. Real-time chunking (RTC)
-  does not apply here — RTC corrects an iterative flow-matching denoising trajectory, and this
-  decoder, like ACT's, predicts the whole chunk in one parallel forward pass with nothing to
-  correct mid-trajectory.
-- `torch.compile` hook on the fusion/decoder stack, since inference speed is TurboVLA's whole
-  pitch.
-
-No PEFT/LoRA support — out of scope for this fork, matching the model's small (~0.2B) parameter
-count where full fine-tuning is already cheap.
+The network in `src/lerobot_policy_turbovla_so101/upstream/` is vendored from
+[`H-EmbodVis/TurboVLA`](https://github.com/H-EmbodVis/TurboVLA) @ `a3365e8` (Apache-2.0, which in turn includes
+Grounding DINO and DETR code); see `NOTICE` and `upstream/LICENSE.upstream`. Up to v0.2.0 parts of this package were
+adapted from [`ez1540/turbovla-lerobot-plugin`](https://github.com/ez1540/turbovla-lerobot-plugin). This repository
+adds the LeRobot integration (config, processors, upstream-checkpoint loading, upstream's optimiser groups and
+schedule), the parity tests, temporal ensembling for rollout, and validation on a real SO-101 arm.
 
 ## License
 

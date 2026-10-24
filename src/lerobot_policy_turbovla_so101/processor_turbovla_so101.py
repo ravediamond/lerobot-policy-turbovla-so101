@@ -38,13 +38,16 @@ def make_turbovla_so101_pre_post_processors(
     inputs. The post-processing pipeline handles unnormalization and moves the model outputs back to
     the CPU.
 
-    The default pipeline is all TurboVLA needs. Two things worth knowing about why:
+    The default pipeline is all TurboVLA needs, given the config's normalisation mapping, which mirrors
+    upstream's data loader:
 
-    - The task string rides along as complementary data, so `batch["task"]` reaches the policy
-      untouched. Tokenization happens inside the model, against whichever `language_backbone` the
-      config names.
-    - The visual stream is mapped to `NormalizationMode.IDENTITY` in the config, so the normalizer
-      leaves images alone and the model applies the vision backbone's own ImageNet normalization.
+    - actions: MIN_MAX to [-1, 1], the range of the model's `tanh` head (upstream min-max-normalises
+      and clamps them the same way);
+    - state: MEAN_STD (upstream z-scores it);
+    - images: IDENTITY here; the policy resizes them to `image_size` and applies DINOv3's ImageNet
+      normalisation itself, as upstream's DINOv3 processor does;
+    - the task string rides along as complementary data and is tokenized inside the model by
+      upstream's BERT text encoder.
 
     Args:
         config (TurboVLAConfig): The TurboVLA policy configuration object.

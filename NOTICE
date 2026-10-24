@@ -6,11 +6,17 @@ turbovla-lerobot-plugin (https://github.com/ez1540/turbovla-lerobot-plugin),
 Copyright 2026 The TurboVLA-LeRobot contributors, licensed under the
 Apache License, Version 2.0.
 
-The module structure (configuration/modeling/processor split), the
-PreTrainedConfig/PreTrainedPolicy integration, the bidirectional
-vision-language fusion layers, and the ACT-style action decoder are
-adapted from that project. See README.md for the list of changes made
-in this fork.
+The configuration/modeling/processor split and the
+PreTrainedConfig/PreTrainedPolicy integration are adapted from that project.
+
+Since v0.3.0 this product includes the TurboVLA model code from
+https://github.com/H-EmbodVis/TurboVLA (commit a3365e8f1787d30bafd99d2806edbf4dc82b5370),
+licensed under the Apache License, Version 2.0, in
+src/lerobot_policy_turbovla_so101/upstream/ (license text in LICENSE.upstream).
+That code includes portions of Grounding DINO (Copyright (c) 2023 IDEA), DETR
+(Copyright (c) Facebook, Inc. and its affiliates) and timm's DropPath
+(Copyright (c) Ross Wightman), all Apache-2.0. Each vendored file's header
+lists the changes made.
 
 TurboVLA is itself based on research published as:
   Xie, H., Yao, C., Wu, X., et al. "TurboVLA: Real-Time Vision-Language-Action
