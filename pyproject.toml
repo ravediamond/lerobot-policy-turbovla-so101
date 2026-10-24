@@ -6,8 +6,8 @@ build-backend = "setuptools.build_meta"
 # LeRobot discovers third-party policies by walking installed distributions and importing every 
 # one whose name starts with it (see `lerobot.utils.import_utils.register_third_party_plugins`).
 name = "lerobot_policy_turbovla_so101"
-version = "0.2.0"
-description = "TurboVLA as a drop-in LeRobot policy, validated on a real SO-101 arm: --policy.type=turbovla_so101"
+version = "0.3.0"
+description = "TurboVLA (upstream code, parity-tested) as a LeRobot policy, run on a real SO-101 arm: --policy.type=turbovla_so101"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
@@ -25,7 +25,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8.1.0,<10.0.0"]
+test = ["pytest>=8.1.0,<10.0.0", "tokenizers>=0.21"]
 plots = ["matplotlib>=3.8.0"]
 
 [project.urls]
@@ -37,9 +37,14 @@ Issues = "https://github.com/ravediamond/lerobot-policy-turbovla-so101/issues"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"lerobot_policy_turbovla_so101.upstream" = ["LICENSE.upstream"]
+
 [tool.ruff]
 line-length = 110
 target-version = "py312"
+# Vendored upstream code stays byte-for-byte diffable against H-EmbodVis/TurboVLA: not reformatted.
+extend-exclude = ["src/lerobot_policy_turbovla_so101/upstream"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "B", "UP"]

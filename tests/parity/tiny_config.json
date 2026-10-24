@@ -1,0 +1,9 @@
+{
+  "text": {"max_length": 256, "padding_length": 21, "sub_sentence_present": true, "frozen": true,
+           "force_eval_when_frozen": true, "zero_padded_tokens": false},
+  "interaction": {"hidden_dim": 32, "nheads": 4, "num_layers": 2, "dim_feedforward": 64,
+                  "enhancer_inner_dim": 64, "text_dropout": 0.0, "fusion_dropout": 0.0,
+                  "fusion_droppath": 0.1, "compute_precision": "fp32"},
+  "action": {"action_dim": 6, "state_dim": 6, "horizon": 12, "num_state_tokens": 2, "num_layers": 3,
+             "mlp_hidden_dim": 32, "state_hidden_dim": 16, "dropout": 0.1}
+}

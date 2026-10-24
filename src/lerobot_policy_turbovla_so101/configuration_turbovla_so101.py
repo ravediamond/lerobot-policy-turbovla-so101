@@ -13,140 +13,144 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import math
 from dataclasses import dataclass, field
 
 from lerobot.configs import NormalizationMode, PreTrainedConfig
 from lerobot.optim import AdamWConfig
-from lerobot.optim.schedulers import CosineDecayWithWarmupSchedulerConfig
+from lerobot.optim.schedulers import LRSchedulerConfig
+from torch.optim import Optimizer
+from torch.optim.lr_scheduler import LambdaLR
+
+UPSTREAM_COMMIT = "a3365e8f1787d30bafd99d2806edbf4dc82b5370"
+LIBERO_CHECKPOINT = "hf://H-EmbodVis/TurboVLA/checkpoints/libero/turbovla_libero.pth"
+
+
+@LRSchedulerConfig.register_subclass("turbovla_warmup_cosine")
+@dataclass
+class TurboVLASchedulerConfig(LRSchedulerConfig):
+    """Upstream's `build_scheduler` (turbovla/training/trainer.py): the LR multiplier ramps linearly
+    from 0.1 to 1.0 over the warmup, then follows a cosine from 1.0 down to `min_lr_ratio`. The released
+    LIBERO recipe uses `min_lr_ratio=1.0`, i.e. a constant LR after warmup."""
+
+    num_warmup_steps: int = 10_000
+    min_lr_ratio: float = 1.0
+
+    def build(self, optimizer: Optimizer, num_training_steps: int) -> LambdaLR:
+        warmup, min_ratio = self.num_warmup_steps, self.min_lr_ratio
+
+        def lr_lambda(step):
+            if step < warmup:
+                return 0.1 + 0.9 * float(step + 1) / float(max(1, warmup))
+            progress = float(step - warmup) / float(max(1, num_training_steps - warmup))
+            progress = min(max(progress, 0.0), 1.0)
+            return min_ratio + (1.0 - min_ratio) * 0.5 * (1.0 + math.cos(progress * math.pi))
+
+        return LambdaLR(optimizer, lr_lambda)
 
 
 @PreTrainedConfig.register_subclass("turbovla_so101")
 @dataclass
 class TurboVLAConfig(PreTrainedConfig):
-    """Configuration class for the TurboVLA policy.
+    """TurboVLA (arXiv 2607.27205) as a LeRobot policy, faithful to the authors' code.
 
-    Defaults follow the paper's LIBERO recipe, which is also the recommended starting point for
-    SO-101 real-arm data (6-DoF + gripper is close enough to the 7-D case, and `chunk_size=12` at
-    30 fps is a sane chunk).
+    The network is upstream's own code, vendored unchanged from `H-EmbodVis/TurboVLA` @ `a3365e8` in
+    `upstream/` (see that package's file headers for the few compatibility patches). Every default here
+    is upstream's released LIBERO recipe (`experiments/libero/README.md` + trainer defaults), so the
+    released LIBERO checkpoint loads into this policy tensor for tensor (`upstream_init_checkpoint`).
 
-    TurboVLA replaces the usual V -> L -> A pathway (an LLM in the middle) with a direct V + L -> A
-    map: DINOv3 patch tokens and BERT *token-level* embeddings are fused by N bidirectional
-    cross-attention layers, then an ACT-style decoder emits the whole action chunk in one parallel
-    forward pass. There is no action tokenization and no autoregressive decode.
+    Architecture: DINOv3 ViT-B/16 per camera (trainable, 256 px) -> VisionProjection (LN, MLP + linear
+    skip, LN) + view embedding; frozen BERT-base with Grounding-DINO sub-sentence masks -> linear
+    projection; 6 x [BiAttentionBlock (one shared affinity, layer-scale 1e-4, drop-path 0.1) + text
+    self-attention layer]; robot state -> 2 tokens appended to the fused memory; ACT decoder (3 pre-norm
+    layers, FFN 2048, 12 learned queries) -> 3-layer MLP -> tanh. Actions are min-max normalised to
+    [-1, 1] (hence the tanh), state is z-scored, images get ImageNet normalisation inside the model.
+    Loss: masked L1.
 
-    The parameters you will most likely need to change are the ones which depend on the environment
-    / sensors. Those are: `input_features` and `output_features`.
+    Plugin-only options, off by default (not in the paper): `state_dropout_prob`.
 
-    Notes on the inputs and outputs:
-        - At least one key starting with "observation.images." is required as an input. If there are
-          several, they are treated as multiple camera views and each gets its own camera-view
-          embedding. Right now we only support all images having the same shape.
-        - May optionally work without an "observation.state" key for the proprioceptive robot state.
-        - "action" is required as an output key.
-        - The task string is required. It arrives in the batch as `task` and is the whole point of
-          this policy: without it TurboVLA is just a worse ACT.
+    Camera order matters: view 0 / view 1 index the view embedding. LIBERO's checkpoint was trained with
+    view 0 = the third-person camera and view 1 = the wrist camera; set `camera_order` so the same holds.
 
-    Args:
-        n_obs_steps: Number of environment steps worth of observations to pass to the policy. Only
-            1 is supported (upstream TurboVLA is single-frame, as is ACT).
-        chunk_size: The size of the action prediction "chunks" in units of environment steps. This
-            is `H`, the number of learnable action queries in the decoder.
-        n_action_steps: The number of action steps to run in the environment for one invocation of
-            the policy. This should be no greater than the chunk size.
-        vision_backbone: HF repo id of the DINOv3 vision encoder. NOTE: the `facebook/dinov3-*`
-            repos are *gated* — accept the terms on the model page and log in with `hf auth login`
-            (or set `HF_TOKEN`) before training, otherwise loading fails with a 401.
-        language_backbone: HF repo id of the language encoder. Token-level embeddings are used, not
-            a pooled sentence embedding — that is what preserves object / attribute / spatial
-            grounding. The paper reports the encoder is swappable (T5-small 97.1%, SigLIP-B 95.5%).
-        load_pretrained_backbones: Whether to download pretrained backbone weights. Set to False to
-            build both backbones from their configs with random init, which is the only way to
-            construct the policy without Hub access (used by the tests).
-        freeze_vision_backbone: Freeze DINOv3. Dominates both VRAM and final quality.
-        freeze_language_backbone: Freeze the language encoder.
-        image_size: Images are resized to this square resolution before the vision backbone. Must be
-            divisible by the backbone's patch size (16 for the `dinov3-vit*16` family).
-        max_language_tokens: Max instruction length in tokens; longer instructions are truncated.
-        dim_model: The shared width `d` of the fusion trunk and the action decoder.
-        n_heads: Number of attention heads in the fusion and decoder blocks.
-        dim_feedforward: Hidden width of the feed-forward layers.
-        feedforward_activation: Activation used in the feed-forward layers.
-        dropout: Dropout used in the fusion and decoder blocks.
-        n_fusion_layers: `N`, the number of bidirectional vision-language cross-attention layers.
-        n_decoder_layers: Number of ACT-style action-decoder layers.
-        optimizer_lr: Peak learning rate for the newly initialized trunk.
-        optimizer_lr_backbone: Learning rate for the pretrained backbones. Ignored for whichever
-            backbones are frozen.
-        optimizer_betas: AdamW (beta1, beta2). The paper uses (0.9, 0.95), not AdamW's own
-            default (0.9, 0.999) -- this was previously hardcoded to the AdamW default since
-            `get_optimizer_preset` never passed it through.
-        temporal_ensemble_coeff: Coefficient for exponentially-weighted temporal ensembling across
-            overlapping action chunks (as in ACT's Algorithm 2), which smooths out the visible
-            per-chunk jitter a single-shot decoder like this one otherwise has at rollout. `None`
-            (default) disables it and uses a plain action queue instead. Requires
-            `n_action_steps == 1` when set, since the ensembler needs a new chunk every step to
-            average over.
-        compile_model: Whether to wrap the fusion + action-decoder forward pass in `torch.compile`.
-            Off by default since it adds a warmup-compilation cost on the first call; worth turning
-            on for repeated rollout on the same shapes, since inference speed is the whole point of
-            this architecture.
+    Args (beyond the LeRobot standard ones):
+        upstream_init_checkpoint: Upstream TurboVLA checkpoint (`.pth`) to initialise from, as a local
+            path or `hf://<repo>/<path>`. Every tensor whose shape matches is loaded; the ones that depend
+            on the robot (state / action width, number of action queries when `chunk_size` != 12) keep
+            their fresh init and are listed in the log. The paper's real-robot runs start from
+            `LIBERO_CHECKPOINT`. Only used when training starts, never when a trained policy is loaded.
+        state_dropout_prob: Plugin-only (not in the paper): during training, replace the normalised
+            state by zeros (the dataset mean) for this fraction of samples, so the arm's own pose cannot
+            stand in for the instruction. 0 = upstream behaviour.
     """
 
     # Input / output structure.
     n_obs_steps: int = 1
     chunk_size: int = 12
     n_action_steps: int = 12
+    camera_order: list[str] | None = None
 
-    # Images are fed to DINOv3, which expects its own ImageNet-style normalization. We therefore
-    # keep the visual stream untouched by the dataset normalizer and apply the backbone's
-    # normalization inside the model, where it belongs.
     normalization_mapping: dict[str, NormalizationMode] = field(
         default_factory=lambda: {
             "VISUAL": NormalizationMode.IDENTITY,
             "STATE": NormalizationMode.MEAN_STD,
-            "ACTION": NormalizationMode.MEAN_STD,
+            "ACTION": NormalizationMode.MIN_MAX,
         }
     )
 
-    # Architecture: backbones.
+    # Backbones.
     vision_backbone: str = "facebook/dinov3-vitb16-pretrain-lvd1689m"
     language_backbone: str = "google-bert/bert-base-uncased"
     load_pretrained_backbones: bool = True
-    freeze_vision_backbone: bool = True
+    freeze_vision_backbone: bool = False
     freeze_language_backbone: bool = True
-    image_size: int = 224
-    max_language_tokens: int = 32
+    image_size: int = 256
+    vision_dropout: float = 0.1
+    dinov3_precision: str = "bf16_autocast"
 
-    # Architecture: shared trunk.
+    # Text.
+    max_language_tokens: int = 256
+    text_padding_length: int | None = 21
+    sub_sentence_present: bool = True
+    zero_padded_text: bool = False
+
+    # Vision-language interaction.
     dim_model: int = 256
     n_heads: int = 8
-    dim_feedforward: int = 1024
-    feedforward_activation: str = "relu"
-    dropout: float = 0.1
-    n_fusion_layers: int = 6
-    n_decoder_layers: int = 4
+    n_interaction_layers: int = 6
+    enhancer_inner_dim: int = 1024
+    text_dropout: float = 0.0
+    fusion_dropout: float = 0.0
+    fusion_droppath: float = 0.1
+    interaction_precision: str = "fp32"
 
-    # Training preset. These now actually match the paper's LIBERO recipe (Table 8): betas
-    # (0.9, 0.95) not AdamW's own (0.9, 0.999) default, weight_decay 1e-10 not 1e-4, grad_clip_norm
-    # 1.0 not 10.0. The previous defaults were a docstring/code mismatch -- the docstring already
-    # claimed "follows the paper's recipe" but these three didn't.
+    # Action head.
+    dim_feedforward: int = 2048
+    n_decoder_layers: int = 3
+    num_state_tokens: int = 2
+    state_hidden_dim: int = 256
+    action_mlp_hidden_dim: int = 512
+    action_dropout: float = 0.1
+
+    # Initialisation and plugin-only options.
+    upstream_init_checkpoint: str | None = None
+    state_dropout_prob: float = 0.0
+
+    # Training preset: upstream's trainer defaults. AdamW keeps torch's default betas (upstream passes
+    # none; the paper states none). Weight decay 1e-10 on weight matrices, 0 on biases / norms.
     optimizer_lr: float = 5e-5
-    optimizer_betas: tuple[float, float] = (0.9, 0.95)
+    optimizer_lr_backbone: float = 5e-5
+    optimizer_betas: tuple[float, float] = (0.9, 0.999)
+    optimizer_eps: float = 1e-8
     optimizer_weight_decay: float = 1e-10
-    optimizer_lr_backbone: float = 5e-6
     optimizer_grad_clip_norm: float = 1.0
     scheduler_warmup_steps: int = 10_000
-    scheduler_decay_steps: int = 80_000
-    scheduler_decay_lr: float = 5e-7
+    scheduler_min_lr_ratio: float = 1.0
 
-    # Rollout smoothing and inference speed.
+    # Rollout smoothing.
     temporal_ensemble_coeff: float | None = None
-    compile_model: bool = False
 
     def __post_init__(self):
         super().__post_init__()
-
-        """Input validation (not exhaustive)."""
         if self.temporal_ensemble_coeff is not None and self.n_action_steps > 1:
             raise ValueError(
                 "`n_action_steps` must be 1 when using temporal ensembling. This is because the "
@@ -169,21 +173,22 @@ class TurboVLAConfig(PreTrainedConfig):
             )
         if self.image_size <= 0:
             raise ValueError(f"`image_size` must be positive. Got {self.image_size}.")
+        if not 0.0 <= self.state_dropout_prob < 1.0:
+            raise ValueError(f"`state_dropout_prob` must be in [0, 1). Got {self.state_dropout_prob}.")
 
     def get_optimizer_preset(self) -> AdamWConfig:
+        # Per-group LR and weight decay come from `TurboVLAPolicy.get_optim_params`.
         return AdamWConfig(
             lr=self.optimizer_lr,
             betas=self.optimizer_betas,
+            eps=self.optimizer_eps,
             weight_decay=self.optimizer_weight_decay,
             grad_clip_norm=self.optimizer_grad_clip_norm,
         )
 
-    def get_scheduler_preset(self) -> CosineDecayWithWarmupSchedulerConfig:
-        return CosineDecayWithWarmupSchedulerConfig(
-            num_warmup_steps=self.scheduler_warmup_steps,
-            num_decay_steps=self.scheduler_decay_steps,
-            peak_lr=self.optimizer_lr,
-            decay_lr=self.scheduler_decay_lr,
+    def get_scheduler_preset(self) -> TurboVLASchedulerConfig:
+        return TurboVLASchedulerConfig(
+            num_warmup_steps=self.scheduler_warmup_steps, min_lr_ratio=self.scheduler_min_lr_ratio
         )
 
     def validate_features(self) -> None:
@@ -192,8 +197,21 @@ class TurboVLAConfig(PreTrainedConfig):
                 "TurboVLA requires at least one camera: no `observation.images.*` key was found in "
                 "`input_features`."
             )
+        if self.robot_state_feature is None:
+            raise ValueError(
+                "TurboVLA conditions its action decoder on the robot state: add `observation.state`."
+            )
         if self.action_feature is None:
             raise ValueError("TurboVLA requires an `action` key in `output_features`.")
+        if self.camera_order is not None and sorted(self.camera_order) != sorted(self.image_features):
+            raise ValueError(
+                f"`camera_order` {self.camera_order} must list exactly the image features "
+                f"{list(self.image_features)}."
+            )
+
+    @property
+    def ordered_camera_keys(self) -> list[str]:
+        return list(self.camera_order) if self.camera_order is not None else list(self.image_features)
 
     @property
     def observation_delta_indices(self) -> None:

@@ -13,28 +13,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""TurboVLA Policy
+"""TurboVLA policy: upstream's network, LeRobot's harness.
 
-A direct V + L -> A map, as per TurboVLA (paper: https://arxiv.org/abs/2607.27205, code:
-https://github.com/H-EmbodVis/TurboVLA). There is no LLM in the middle, no action tokenization and
-no autoregressive decode:
+The network (`self.model`) is `H-EmbodVis/TurboVLA`'s own `TurboVLA` module, vendored in `upstream/`,
+so its parameter names are upstream's and a released checkpoint loads into it directly. This file only
+does what upstream's data loader and trainer did around it:
 
-    images (N cams) --> DINOv3 ViT --> proj to d ------.
-                        + patch pos emb                |
-                        + camera-view emb              +--> N bidirectional cross-attention layers
-                                                       |    (LN + xattn + FFN, residual)
-    instruction ------> BERT (token-level) --> proj ---'                |
-                                                                        v
-                                                        ACT-style parallel action decoder
-                                                                        |
-                                                                        v
-                                                          continuous chunk (H, action_dim)
-
-Only the modules were ported from upstream, not the harness: upstream is built around its own
-trainer, TFDS/RLDS for LIBERO, and a `flash-attn` dependency. Here `lerobot-train` drives
-everything and all attention goes through `scaled_dot_product_attention`.
+- images: resize to `image_size` (bilinear, antialiased), ImageNet-normalise, stack the cameras in
+  `camera_order` -> `{"dinov3": (B, V, 3, H, W)}` (upstream feeds pre-resized 256-px frames through the
+  DINOv3 processor with resize disabled, which is the same rescale + normalise);
+- state and actions arrive normalised by LeRobot's processor (MEAN_STD state, MIN_MAX actions to
+  [-1, 1]), as upstream's loader normalises them;
+- loss: upstream's `masked_l1_loss`;
+- optimiser groups: upstream's `build_param_group_optimizer` (DINOv3 vs head, weight decay only on
+  weight matrices).
 """
 
+import contextvars
+import logging
 from collections import deque
 from typing import Unpack
 
@@ -44,79 +40,237 @@ from lerobot.policies.pretrained import ActionSelectKwargs, PreTrainedPolicy
 from lerobot.utils.constants import ACTION, OBS_STATE
 from torch import Tensor, nn
 
-from .action_decoder import TurboVLAActionDecoder
-from .configuration_turbovla_so101 import TurboVLAConfig
+from .configuration_turbovla_so101 import UPSTREAM_COMMIT, TurboVLAConfig
 from .temporal_ensemble import TemporalEnsembler
-from .vl_interaction import TurboVLAVLInteraction
 
-# DINOv3 (like DINOv2 and most ImageNet-pretrained ViTs) expects ImageNet-normalized inputs. The
-# dataset normalizer leaves the visual stream alone (`NormalizationMode.IDENTITY`), so we apply this
-# here, right where the backbone that needs it lives.
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
-_GATED_BACKBONE_HINT = (
-    "The `facebook/dinov3-*` repos are gated. Accept the terms on the model page, then "
-    "authenticate with `hf auth login` or set the HF_TOKEN environment variable. To build the "
-    "policy without any Hub download (random init, e.g. for a smoke test), set "
-    "`--policy.load_pretrained_backbones=false`."
-)
+# Set while `from_pretrained` builds the policy: the saved weights replace everything right after, so
+# neither the upstream init checkpoint nor the pretrained backbone weights need to be fetched.
+_LOADING_SAVED_POLICY = contextvars.ContextVar("turbovla_loading_saved_policy", default=False)
+
+
+def masked_l1_loss(pred: Tensor, target: Tensor, mask: Tensor) -> Tensor:
+    """Upstream `turbovla/training/trainer.py` `masked_l1_loss`, unchanged."""
+    l1 = torch.abs(pred - target)
+    mask = mask.unsqueeze(-1).float()
+    l1 = l1 * mask
+    denom = (mask.sum() * pred.shape[-1]).clamp_min(1.0)
+    return l1.sum() / denom
+
+
+def _use_weight_decay(name: str, param: Tensor) -> bool:
+    """Upstream `turbovla/training/trainer.py` `_use_weight_decay`, unchanged."""
+    if param.ndim <= 1:
+        return False
+    lowered = name.lower()
+    if lowered.endswith(".bias"):
+        return False
+    if "norm" in lowered or "layernorm" in lowered:
+        return False
+    return True
+
+
+def build_upstream_config(config: TurboVLAConfig, pretrained_backbones: bool):
+    """The upstream `TurboVLAConfig` this LeRobot config describes."""
+    from .upstream.configuration import (
+        ActionHeadConfig,
+        InteractionConfig,
+        TextEncoderConfig,
+        VisionEncoderConfig,
+    )
+    from .upstream.configuration import TurboVLAConfig as UpstreamConfig
+
+    return UpstreamConfig(
+        compatibility_profile="libero",
+        text=TextEncoderConfig(
+            model_name_or_path=config.language_backbone,
+            max_length=config.max_language_tokens,
+            padding_length=config.text_padding_length,
+            sub_sentence_present=config.sub_sentence_present,
+            frozen=config.freeze_language_backbone,
+            force_eval_when_frozen=True,
+            zero_padded_tokens=config.zero_padded_text,
+            pretrained=pretrained_backbones,
+        ),
+        vision=VisionEncoderConfig(
+            model_name_or_path=config.vision_backbone,
+            image_size=config.image_size,
+            num_views=len(config.image_features),
+            position_embedding="view",
+            encode_views_separately=True,
+            frozen=config.freeze_vision_backbone,
+            compute_precision=config.dinov3_precision,
+            dropout=config.vision_dropout,
+            pretrained=pretrained_backbones,
+        ),
+        interaction=InteractionConfig(
+            hidden_dim=config.dim_model,
+            nheads=config.n_heads,
+            num_layers=config.n_interaction_layers,
+            dim_feedforward=config.dim_feedforward,
+            enhancer_inner_dim=config.enhancer_inner_dim,
+            text_dropout=config.text_dropout,
+            fusion_dropout=config.fusion_dropout,
+            fusion_droppath=config.fusion_droppath,
+            compute_precision=config.interaction_precision,
+        ),
+        action=ActionHeadConfig(
+            action_dim=config.action_feature.shape[0],
+            state_dim=config.robot_state_feature.shape[0],
+            horizon=config.chunk_size,
+            num_state_tokens=config.num_state_tokens,
+            num_layers=config.n_decoder_layers,
+            mlp_hidden_dim=config.action_mlp_hidden_dim,
+            state_hidden_dim=config.state_hidden_dim,
+            dropout=config.action_dropout,
+        ),
+    )
+
+
+def build_upstream_model(config: TurboVLAConfig, pretrained_backbones: bool) -> nn.Module:
+    from .upstream.turbovla import TurboVLA
+
+    return TurboVLA(build_upstream_config(config, pretrained_backbones))
+
+
+def read_upstream_state_dict(path: str) -> dict[str, Tensor]:
+    """An upstream `.pth` (local path or `hf://<repo>/<file>`) -> its model state dict, read the way
+    upstream's evaluator reads it (`ema_model_state_dict` first, then `model_state_dict`, `module.`
+    prefixes stripped)."""
+    if path.startswith("hf://"):
+        from huggingface_hub import hf_hub_download
+
+        org, name, filename = path[len("hf://") :].split("/", 2)
+        path = hf_hub_download(repo_id=f"{org}/{name}", filename=filename)
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    if not isinstance(checkpoint, dict):
+        raise TypeError(f"Unsupported checkpoint type: {type(checkpoint)}")
+    state = checkpoint.get("ema_model_state_dict")
+    if not isinstance(state, dict):
+        state = checkpoint.get("model_state_dict")
+    if not isinstance(state, dict):
+        raise KeyError("expected `ema_model_state_dict` or `model_state_dict` in the upstream checkpoint")
+    return {k[len("module.") :] if k.startswith("module.") else k: v for k, v in state.items()}
+
+
+# transformers 5 nests DINOv3's blocks one level deeper (`DINOv3ViTModel.layer` -> `.model.layer`).
+# Upstream checkpoints (and the released LIBERO one) were saved under transformers 4.56's names.
+_BACKBONE_RENAMES = (("vision_encoder.backbone.layer.", "vision_encoder.backbone.model.layer."),)
+
+
+def align_backbone_names(source: dict[str, Tensor], target_keys) -> tuple[dict[str, Tensor], int]:
+    """Rename source keys between transformers 4.x and 5.x backbone layouts, in whichever direction
+    the installed transformers needs. Returns the renamed dict and how many keys changed."""
+    target_keys = set(target_keys)
+    renamed, n = {}, 0
+    for key, value in source.items():
+        new = key
+        if key not in target_keys:
+            for old_prefix, new_prefix in _BACKBONE_RENAMES:
+                for a, b in ((old_prefix, new_prefix), (new_prefix, old_prefix)):
+                    if key.startswith(a) and b + key[len(a) :] in target_keys:
+                        new = b + key[len(a) :]
+        n += new != key
+        renamed[new] = value
+    return renamed, n
+
+
+def load_upstream_weights(model: nn.Module, source: dict[str, Tensor]) -> dict:
+    """Load every tensor whose name and shape match; tensors whose shape depends on the robot (state /
+    action width, number of action queries) keep their fresh init. Any other mismatch, missing or unused
+    tensor is an error: no silent partial load."""
+    target = model.state_dict()
+    source, n_renamed = align_backbone_names(source, target)
+    reinitialised = sorted(k for k in target if k in source and source[k].shape != target[k].shape)
+    missing = sorted(k for k in target if k not in source)
+    unused = sorted(k for k in source if k not in target)
+    robot_dependent = (
+        "action_head.state_projection.",
+        "action_head.decoder.action_projection.layers.2.",
+        "action_head.decoder.action_queries.",
+    )
+    unexpected = [k for k in reinitialised if not k.startswith(robot_dependent)]
+    if missing or unused or unexpected:
+        raise RuntimeError(
+            f"upstream checkpoint does not fit: missing {missing[:10]}, unused {unused[:10]}, "
+            f"shape mismatch outside the robot-dependent tensors {unexpected[:10]}"
+        )
+    merged = {k: (target[k] if k in reinitialised else source[k]) for k in target}
+    model.load_state_dict(merged, strict=True)
+    return {
+        "loaded": len(target) - len(reinitialised),
+        "reinitialised": reinitialised,
+        "total": len(target),
+        "renamed_backbone_keys": n_renamed,
+    }
 
 
 class TurboVLAPolicy(PreTrainedPolicy):
-    """TurboVLA: language-conditioned action chunking with a bidirectional V-L trunk.
-
-    A drop-in alternative to ACT with the same ergonomics (chunked continuous actions, parallel
-    decode, L1 loss). The difference that matters in practice: ACT ignores the task string, so a
-    multi-task dataset needs one checkpoint per task. TurboVLA conditions on it, so one checkpoint
-    can cover many tasks in the same dataset.
-    """
+    """TurboVLA (arXiv 2607.27205), upstream code @ a3365e8, behind LeRobot's policy interface."""
 
     config_class = TurboVLAConfig
     name = "turbovla_so101"
-    # FSDP2 wrap units: one unit per transformer layer of both stacks.
-    _fsdp_wrap_modules = ["TurboVLAFusionLayer", "TurboVLADecoderLayer"]
+    _fsdp_wrap_modules = ["BiAttentionBlock", "TransformerEncoderLayer", "TransformerDecoderLayer"]
 
     def __init__(self, config: TurboVLAConfig, **kwargs):
-        """
-        Args:
-            config: Policy configuration class instance or None, in which case the default
-                    instantiation of the configuration class is used.
-        """
         super().__init__(config)
         config.validate_features()
         self.config = config
+        loading_saved = _LOADING_SAVED_POLICY.get()
+        self.camera_keys = config.ordered_camera_keys
 
-        self.model = TurboVLA(config)
+        self.model = build_upstream_model(
+            config, pretrained_backbones=config.load_pretrained_backbones and not loading_saved
+        )
+        self.register_buffer("image_mean", torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1), persistent=False)
+        self.register_buffer("image_std", torch.tensor(IMAGENET_STD).view(1, 3, 1, 1), persistent=False)
+
+        self.init_report = None
+        if config.upstream_init_checkpoint and not loading_saved:
+            self.init_report = load_upstream_weights(
+                self.model, read_upstream_state_dict(config.upstream_init_checkpoint)
+            )
+            self.init_report["checkpoint"] = config.upstream_init_checkpoint
+            logging.info(
+                f"TurboVLA init from {config.upstream_init_checkpoint} (upstream {UPSTREAM_COMMIT[:7]}): "
+                f"{self.init_report['loaded']}/{self.init_report['total']} tensors loaded, re-initialised "
+                f"{self.init_report['reinitialised']}"
+            )
 
         if config.temporal_ensemble_coeff is not None:
             self.temporal_ensembler = TemporalEnsembler(config.temporal_ensemble_coeff, config.chunk_size)
-
         self.reset()
 
-    def get_optim_params(self) -> dict:
-        """Two param groups: the freshly initialized trunk, and the pretrained backbones.
+    @classmethod
+    def from_pretrained(cls, *args, **kwargs):
+        token = _LOADING_SAVED_POLICY.set(True)
+        try:
+            return super().from_pretrained(*args, **kwargs)
+        finally:
+            _LOADING_SAVED_POLICY.reset(token)
 
-        Frozen backbones contribute no parameters at all (`requires_grad` is False), so the second
-        group is simply empty in the default configuration.
-        """
-        backbone_prefixes = ("model.vision_encoder", "model.language_encoder")
+    def get_optim_params(self) -> list[dict]:
+        """Upstream's `build_param_group_optimizer`: DINOv3 vs everything else, weight decay only on
+        weight matrices (not biases or norms). Frozen parameters (BERT) are left out, as upstream does."""
+        c = self.config
+        groups = {
+            "dinov3_decay": (c.optimizer_lr_backbone, c.optimizer_weight_decay),
+            "dinov3_no_decay": (c.optimizer_lr_backbone, 0.0),
+            "head_decay": (c.optimizer_lr, c.optimizer_weight_decay),
+            "head_no_decay": (c.optimizer_lr, 0.0),
+        }
+        params = {k: [] for k in groups}
+        for name, param in self.model.named_parameters():
+            if not param.requires_grad:
+                continue
+            prefix = "dinov3" if name.startswith("vision_encoder.backbone") else "head"
+            params[f"{prefix}_{'decay' if _use_weight_decay(name, param) else 'no_decay'}"].append(param)
         return [
-            {
-                "params": [
-                    p
-                    for n, p in self.named_parameters()
-                    if not n.startswith(backbone_prefixes) and p.requires_grad
-                ]
-            },
-            {
-                "params": [
-                    p
-                    for n, p in self.named_parameters()
-                    if n.startswith(backbone_prefixes) and p.requires_grad
-                ],
-                "lr": self.config.optimizer_lr_backbone,
-            },
+            {"params": params[k], "lr": lr, "weight_decay": wd, "name": k}
+            for k, (lr, wd) in groups.items()
+            if params[k]
         ]
 
     def reset(self):
@@ -126,288 +280,74 @@ class TurboVLAPolicy(PreTrainedPolicy):
         else:
             self._action_queue = deque([], maxlen=self.config.n_action_steps)
 
+    def _images(self, batch: dict[str, Tensor]) -> Tensor:
+        views = []
+        for key in self.camera_keys:
+            images = batch[key]
+            if images.ndim == 5:  # (B, T, C, H, W) with n_obs_steps == 1
+                images = images[:, -1]
+            if images.shape[-2:] != (self.config.image_size, self.config.image_size):
+                images = F.interpolate(
+                    images.float(),
+                    size=(self.config.image_size, self.config.image_size),
+                    mode="bilinear",
+                    antialias=True,
+                    align_corners=False,
+                )
+            views.append((images.float().clamp(0.0, 1.0) - self.image_mean) / self.image_std)
+        return torch.stack(views, dim=1)
+
+    def _tasks(self, batch: dict[str, Tensor], batch_size: int) -> list[str]:
+        tasks = batch.get("task")
+        if tasks is None:
+            raise ValueError(
+                "TurboVLA requires a task description, but the batch has no `task` key. Record or "
+                "re-export the dataset with a task string per episode."
+            )
+        if isinstance(tasks, str):
+            tasks = [tasks] * batch_size
+        if len(tasks) != batch_size:
+            raise ValueError(f"got {len(tasks)} task strings for a batch of {batch_size}")
+        return [str(t) for t in tasks]
+
+    def _state(self, batch: dict[str, Tensor]) -> Tensor:
+        state = batch[OBS_STATE]
+        if state.ndim == 3:
+            state = state[:, -1]
+        p = self.config.state_dropout_prob
+        if self.training and p > 0.0:
+            keep = (torch.rand(state.shape[0], 1, device=state.device) >= p).to(state.dtype)
+            state = state * keep  # normalised state: 0 is the dataset mean
+        return state
+
+    def predict_normalized_chunk(self, batch: dict[str, Tensor]) -> Tensor:
+        pixels = self._images(batch)
+        return self.model(self._tasks(batch, pixels.shape[0]), {"dinov3": pixels}, self._state(batch))
+
     @torch.no_grad()
     def select_action(self, batch: dict[str, Tensor], **kwargs: Unpack[ActionSelectKwargs]) -> Tensor:
-        """Select a single action given environment observations.
-
-        This method wraps `predict_action_chunk` in order to return one action at a time for
-        execution in the environment. With `temporal_ensemble_coeff` set, every call queries the
-        model for a fresh chunk and the temporal ensembler blends it with the previous chunks'
-        overlapping predictions rather than draining a queue — this is what removes the visible
-        jitter at chunk boundaries from a single-shot decoder. Otherwise it works by managing the
-        actions in a queue and only calling `predict_action_chunk` when the queue is empty.
-        """
-        self.eval()  # keep eval mode even if train() was called while the queue is being consumed
-
+        """One action per call: from a queue refilled every `n_action_steps`, or, with
+        `temporal_ensemble_coeff` set, a fresh chunk every call blended by ACT's temporal ensembling."""
+        self.eval()
         if self.config.temporal_ensemble_coeff is not None:
-            actions = self.predict_action_chunk(batch)
-            return self.temporal_ensembler.update(actions)
-
+            return self.temporal_ensembler.update(self.predict_action_chunk(batch))
         if len(self._action_queue) == 0:
             actions = self.predict_action_chunk(batch)[:, : self.config.n_action_steps]
-
-            # `predict_action_chunk` returns a (batch_size, n_action_steps, action_dim) tensor, but
-            # the queue effectively has shape (n_action_steps, batch_size, *), hence the transpose.
             self._action_queue.extend(actions.transpose(0, 1))
         return self._action_queue.popleft()
 
     @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, Tensor], **kwargs: Unpack[ActionSelectKwargs]) -> Tensor:
-        """Predict a chunk of actions given environment observations."""
         self.eval()
-        return self.model(batch)
+        return self.predict_normalized_chunk(batch)
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict]:
-        """Run the batch through the model and compute the loss for training or validation."""
-        if batch.get("task") is None:
-            # Without this the policy silently degenerates into a worse ACT: the whole point is the
-            # language conditioning, so fail loudly rather than train a mute model.
-            raise ValueError(
-                "TurboVLA requires a task description, but the batch has no `task` key. Record or "
-                "re-export the dataset with a task string per episode, or use `--policy.type=act` "
-                "if the data genuinely has no language annotation."
-            )
-
-        actions_hat = self.model(batch)
-
-        abs_err = F.l1_loss(batch[ACTION], actions_hat, reduction="none")
-        valid_mask = ~batch["action_is_pad"].unsqueeze(-1)
-        num_valid = valid_mask.sum() * abs_err.shape[-1]
-        l1_loss = (abs_err * valid_mask).sum() / num_valid.clamp_min(1)
-
-        # Plain L1 on the action chunk. No VAE and no KL term, unlike ACT.
-        return l1_loss, {"l1_loss": l1_loss.item()}
-
-
-class TurboVLA(nn.Module):
-    """The underlying neural network for `TurboVLAPolicy`."""
-
-    def __init__(self, config: TurboVLAConfig):
-        super().__init__()
-        self.config = config
-        # Fixed camera order. It has to be stable between training and rollout, since it indexes the
-        # camera-view embedding below.
-        self.camera_keys = list(config.image_features)
-
-        self.vision_encoder, vision_width, self.vision_patch_size = _load_vision_backbone(config)
-        self.language_encoder, language_width = _load_language_backbone(config)
-        self.tokenizer = _load_tokenizer(config)
-
-        if config.image_size % self.vision_patch_size != 0:
-            raise ValueError(
-                f"`image_size` ({config.image_size}) must be divisible by the vision backbone's "
-                f"patch size ({self.vision_patch_size})."
-            )
-        self.n_patches_per_side = config.image_size // self.vision_patch_size
-        self.n_patches = self.n_patches_per_side**2
-
-        if config.freeze_vision_backbone:
-            self.vision_encoder.requires_grad_(False)
-        if config.freeze_language_backbone:
-            self.language_encoder.requires_grad_(False)
-
-        # Project both modalities into the shared width `d`.
-        self.vision_proj = nn.Linear(vision_width, config.dim_model)
-        self.language_proj = nn.Linear(language_width, config.dim_model)
-
-        # Where a patch is in the frame, and which camera it came from. The camera-view embedding is
-        # what keeps views apart as soon as there is more than one.
-        self.patch_pos_embed = nn.Parameter(torch.zeros(1, self.n_patches, config.dim_model))
-        nn.init.normal_(self.patch_pos_embed, std=0.02)
-        self.camera_embed = nn.Embedding(len(self.camera_keys), config.dim_model)
-
-        # Optional proprioceptive state, carried as one extra token alongside the patches.
-        self.state_proj = None
-        if config.robot_state_feature is not None:
-            self.state_proj = nn.Linear(config.robot_state_feature.shape[0], config.dim_model)
-            self.state_embed = nn.Parameter(torch.zeros(1, 1, config.dim_model))
-            nn.init.normal_(self.state_embed, std=0.02)
-
-        self.vl_interaction = TurboVLAVLInteraction(config)
-        self.action_decoder = TurboVLAActionDecoder(config, config.action_feature.shape[0])
-
-        self.register_buffer("image_mean", torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1), persistent=False)
-        self.register_buffer("image_std", torch.tensor(IMAGENET_STD).view(1, 3, 1, 1), persistent=False)
-
-        self._set_frozen_backbones_to_eval()
-
-        # Only fusion + decoder is compiled — the backbones are separate pretrained `transformers`
-        # modules and gain less from tracing.
-        if config.compile_model:
-            torch.set_float32_matmul_precision("high")
-            self.forward = torch.compile(self.forward)
-
-    def train(self, mode: bool = True):
-        """Keep frozen backbones in eval mode so their dropout / norm statistics stay put."""
-        super().train(mode)
-        self._set_frozen_backbones_to_eval()
-        return self
-
-    def _set_frozen_backbones_to_eval(self) -> None:
-        if self.config.freeze_vision_backbone:
-            self.vision_encoder.eval()
-        if self.config.freeze_language_backbone:
-            self.language_encoder.eval()
-
-    def _encode_images(self, batch: dict[str, Tensor]) -> Tensor:
-        """All camera views -> (B, n_cameras * n_patches, dim_model)."""
-        tokens = []
-        for camera_index, key in enumerate(self.camera_keys):
-            images = batch[key]
-            if images.ndim == 5:
-                # (B, T, C, H, W) with n_obs_steps == 1 -> take the current frame.
-                images = images[:, 0]
-
-            if images.shape[-2:] != (self.config.image_size, self.config.image_size):
-                images = F.interpolate(
-                    images,
-                    size=(self.config.image_size, self.config.image_size),
-                    mode="bilinear",
-                    align_corners=False,
-                )
-            images = (images - self.image_mean) / self.image_std
-
-            if self.config.freeze_vision_backbone:
-                with torch.no_grad():
-                    features = self.vision_encoder(pixel_values=images).last_hidden_state
-            else:
-                features = self.vision_encoder(pixel_values=images).last_hidden_state
-
-            # Drop the leading non-patch tokens (CLS, plus DINOv3's register tokens) and keep the
-            # patch grid, which is what carries the spatial detail the decoder needs.
-            n_prefix = features.shape[1] - self.n_patches
-            if n_prefix < 0:
-                raise ValueError(
-                    f"Vision backbone returned {features.shape[1]} tokens, fewer than the "
-                    f"{self.n_patches} patches expected for image_size={self.config.image_size} and "
-                    f"patch_size={self.vision_patch_size}."
-                )
-            features = features[:, n_prefix:]
-
-            projected = self.vision_proj(features) + self.patch_pos_embed
-            projected = projected + self.camera_embed.weight[camera_index].view(1, 1, -1)
-            tokens.append(projected)
-
-        return torch.cat(tokens, dim=1)
-
-    def _encode_language(self, tasks: str | list[str], batch_size: int, device) -> tuple[Tensor, Tensor]:
-        """Instruction -> (B, n_text_tokens, dim_model) plus its (B, n_text_tokens) validity mask."""
-        if isinstance(tasks, str):
-            tasks = [tasks] * batch_size
+        pred = self.predict_normalized_chunk(batch)
+        if "action_is_pad" in batch:
+            mask = ~batch["action_is_pad"]
         else:
-            tasks = list(tasks)
-        if len(tasks) != batch_size:
-            raise ValueError(
-                f"Got {len(tasks)} task strings for a batch of {batch_size}. They must correspond one-to-one."
-            )
-
-        encoded = self.tokenizer(
-            tasks,
-            padding=True,
-            truncation=True,
-            max_length=self.config.max_language_tokens,
-            return_tensors="pt",
-        )
-        input_ids = encoded["input_ids"].to(device)
-        attention_mask = encoded["attention_mask"].to(device)
-
-        if self.config.freeze_language_backbone:
-            with torch.no_grad():
-                out = self.language_encoder(input_ids=input_ids, attention_mask=attention_mask)
-        else:
-            out = self.language_encoder(input_ids=input_ids, attention_mask=attention_mask)
-
-        # Token-level, deliberately *not* pooled — pooling is what loses the object / attribute /
-        # spatial-relation grounding this policy depends on.
-        text_tokens = self.language_proj(out.last_hidden_state)
-        return text_tokens, attention_mask.to(torch.bool)
-
-    def forward(self, batch: dict[str, Tensor]) -> Tensor:
-        """Returns the predicted action chunk, shape (B, chunk_size, action_dim)."""
-        vision_tokens = self._encode_images(batch)
-        batch_size = vision_tokens.shape[0]
-        device = vision_tokens.device
-
-        if self.state_proj is not None:
-            state = batch[OBS_STATE]
-            if state.ndim == 3:
-                state = state[:, 0]
-            state_token = self.state_proj(state).unsqueeze(1) + self.state_embed
-            vision_tokens = torch.cat([state_token, vision_tokens], dim=1)
-
-        tasks = batch.get("task")
-        if tasks is None:
-            raise ValueError("TurboVLA requires a task description, but the batch has no `task` key.")
-        text_tokens, text_mask = self._encode_language(tasks, batch_size, device)
-
-        vision_tokens, text_tokens = self.vl_interaction(
-            vision_tokens, text_tokens, text_padding_mask=text_mask
-        )
-
-        # The decoder cross-attends over both fused streams. Vision tokens are always valid; the
-        # text tokens carry the tokenizer's padding mask.
-        memory = torch.cat([vision_tokens, text_tokens], dim=1)
-        memory_mask = torch.cat(
-            [
-                torch.ones(vision_tokens.shape[:2], dtype=torch.bool, device=device),
-                text_mask,
-            ],
-            dim=1,
-        )
-
-        return self.action_decoder(memory, memory_padding_mask=memory_mask)
-
-
-def _require_transformers():
-    try:
-        import transformers  # noqa: F401
-    except ImportError as e:
-        raise ImportError(
-            "TurboVLA needs `transformers` for its DINOv3 and BERT backbones. Install it with "
-            "`pip install 'transformers>=5.4.0,<5.6.0'`."
-        ) from e
-
-
-def _load_vision_backbone(config: TurboVLAConfig) -> tuple[nn.Module, int, int]:
-    """Returns `(module, hidden_width, patch_size)`."""
-    _require_transformers()
-    from transformers import AutoConfig, AutoModel
-
-    try:
-        backbone_config = AutoConfig.from_pretrained(config.vision_backbone)
-        if config.load_pretrained_backbones:
-            model = AutoModel.from_pretrained(config.vision_backbone)
-        else:
-            model = AutoModel.from_config(backbone_config)
-    except OSError as e:
-        raise OSError(
-            f"Could not load vision backbone '{config.vision_backbone}'. {_GATED_BACKBONE_HINT}"
-        ) from e
-
-    patch_size = getattr(backbone_config, "patch_size", None)
-    if patch_size is None:
-        raise ValueError(
-            f"Vision backbone '{config.vision_backbone}' has no `patch_size` in its config; "
-            "TurboVLA expects a patch-based vision transformer such as DINOv3."
-        )
-    return model, backbone_config.hidden_size, patch_size
-
-
-def _load_language_backbone(config: TurboVLAConfig) -> tuple[nn.Module, int]:
-    """Returns `(module, hidden_width)`."""
-    _require_transformers()
-    from transformers import AutoConfig, AutoModel
-
-    backbone_config = AutoConfig.from_pretrained(config.language_backbone)
-    if config.load_pretrained_backbones:
-        model = AutoModel.from_pretrained(config.language_backbone)
-    else:
-        model = AutoModel.from_config(backbone_config)
-    return model, backbone_config.hidden_size
-
-
-def _load_tokenizer(config: TurboVLAConfig):
-    _require_transformers()
-    from transformers import AutoTokenizer
-
-    return AutoTokenizer.from_pretrained(config.language_backbone)
+            mask = torch.ones(pred.shape[:2], device=pred.device, dtype=torch.bool)
+        # Upstream's loader clamps the min-max-normalised targets to [-1, 1] (the range of the tanh head).
+        target = batch[ACTION].float().clamp(-1.0, 1.0)
+        loss = masked_l1_loss(pred.float(), target, mask)
+        return loss, {"l1_loss": loss.item()}
