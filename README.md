@@ -14,6 +14,8 @@ just simulation. Since v0.3.0 the network **is the authors' own code** (vendored
 [`H-EmbodVis/TurboVLA`](https://github.com/H-EmbodVis/TurboVLA) @ `a3365e8`), with a parity test that checks the
 plugin reproduces upstream's outputs, and the released LIBERO checkpoint loads into it.
 
+Write-ups of the real-arm runs: [TurboVLA: a policy that ignored its instruction](https://shissorobotics.com/blog/2026/10/08/turbovla-a-policy-that-ignored-its-instruction/) and [Paper vs hardware 12: TurboVLA](https://shissorobotics.com/blog/2026/10/23/paper-vs-hardware-turbovla/) on [shissorobotics.com](https://shissorobotics.com/papers/).
+
 > **Status (v0.3.0): faithful port, real-arm results to redo.** Up to v0.2.0 this plugin was *not* the paper's
 > model: it differed from upstream in six places (table below), and every real-arm result in [Results](#results) comes
 > from that port. v0.3.0 replaces the network with upstream's own code. A faithful run with upstream's own trainer
